@@ -1,0 +1,10 @@
+# Configuración de compilación de RECO.
+#
+# La feature `whisper` compila whisper.cpp desde fuente. `bindgen` necesita
+# libclang, y su ruta no siempre está en PATH tras instalar LLVM. Se fija aquí
+# para que el build sea reproducible sin depender del entorno del usuario.
+#
+# Si LLVM está en otra ruta, exporta LIBCLANG_PATH antes de compilar.
+
+[env]
+LIBCLANG_PATH = { value = "C:/Program Files/LLVM/bin", force = false }

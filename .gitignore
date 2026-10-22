@@ -1,0 +1,26 @@
+# Dependencias
+node_modules/
+dist/
+target/
+
+# Referencias de análisis: código de terceros, no forma parte de RECO
+references/
+
+# Salida de compilación y artefactos locales
+src-tauri/gen/
+*.log
+reco-window.png
+reco-*.png
+
+# Sistema
+.DS_Store
+Thumbs.db
+.env
+.env.local
+
+# Modelos de transcripción descargados (grandes, se bajan desde la app)
+*.bin
+*.part
+
+# Pruebas locales de audio
+test-audio/
