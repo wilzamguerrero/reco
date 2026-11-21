@@ -1,0 +1,123 @@
+:root {
+  --bg: #000000;
+  --bg-panel: #0a0a0b;
+  --bg-elevated: #131315;
+  --bg-inset: #060607;
+  --fg: #f2ecec;
+  --fg-muted: #968d92;
+  --fg-dim: #6a6067;
+  --border: #232025;
+  --border-soft: #171416;
+
+  /* Grabación (Rojo incandescente RECO) */
+  --accent: #ff4a3d;
+  --accent-hot: #ff8a5c;
+  --accent-soft: rgba(255, 74, 61, 0.14);
+  --accent-glow: rgba(255, 74, 61, 0.28);
+
+  /* Dictado (Cian eléctrico) */
+  --cyan: #22d3ee;
+  --cyan-soft: rgba(34, 211, 238, 0.14);
+  --cyan-glow: rgba(34, 211, 238, 0.3);
+
+  /* Subida / Notion (Esmeralda) */
+  --ok: #34d399;
+  --ok-soft: rgba(16, 185, 129, 0.14);
+  --warn: #f59e0b;
+
+  --radius: 14px;
+  --radius-sm: 9px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.42;
+  -webkit-font-smoothing: antialiased;
+}
+
+body.is-popup {
+  width: 372px;
+  height: 510px;
+  overflow: hidden;
+}
+
+body.is-sidepanel {
+  min-width: 320px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    transform 90ms ease;
+}
+
+button:hover:not(:disabled) {
+  border-color: #40353c;
+  background: #1f1b21;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  outline: none;
+}
+
+input:focus,
+select:focus {
+  border-color: #4b424d;
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2c252b;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

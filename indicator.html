@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RECO indicador</title>
+    <style>
+      /*
+       * Ventana sin decoración y transparente: solo se ve el orbe, dibujado en
+       * un canvas (src/indicator.ts). El halo se apaga dentro del canvas, lejos
+       * del borde: si llegara a él se cortaría en seco y se vería el cuadrado.
+       */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        user-select: none;
+        cursor: default;
+      }
+
+      canvas {
+        display: block;
+        width: 64px;
+        height: 64px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="orb" aria-hidden="true"></canvas>
+    <script type="module" src="/src/indicator.ts"></script>
+  </body>
+</html>

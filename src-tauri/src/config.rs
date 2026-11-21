@@ -79,7 +79,11 @@ impl Default for DictationConfig {
             enabled: true,
             shortcut: "CapsLock".into(),
             mode: DictationMode::PushToTalk,
-            language: "auto".into(),
+            // La autodetección falla con clips cortos: en frases de dos o tres
+            // segundos Whisper confunde idiomas y devuelve inglés. Como el
+            // usuario dicta en español, se fija ese idioma por defecto; la
+            // autodetección queda como opción explícita.
+            language: "es".into(),
             model_id: "base".into(),
             polish: true,
             clipboard_only: false,

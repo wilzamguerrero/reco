@@ -4,10 +4,12 @@
 //! en la calidad percibida y la más barata de calcular.
 
 /// Muletillas que se eliminan al inicio de frase o entre comas.
-const FILLERS: &[&str] = &[
-    "eh", "ehh", "em", "emm", "uh", "uhh", "mmm", "este", "esto es", "o sea",
-    "pues", "bueno",
-];
+///
+/// Solo interjecciones que no son palabras con significado. «este», «pues»,
+/// «bueno» o «o sea» pueden ser muletilla, pero también abren frases reales
+/// («Este proyecto…», «Bueno, el precio…»): borrarlas cambia el sentido, y
+/// la regla es no tocar el significado.
+const FILLERS: &[&str] = &["eh", "ehh", "em", "emm", "uh", "uhh", "mmm"];
 
 /// Aplica limpieza conservadora al texto transcrito.
 ///

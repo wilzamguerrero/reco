@@ -42,7 +42,16 @@ arboard = "3"
 whisper-rs = { version = "0.16", optional = true }
 
 [features]
-default = []
+# `custom-protocol` incrusta el frontend compilado en el binario y hace que la
+# ventana cargue `tauri://localhost` en vez de `http://localhost:1420`.
+#
+# Sin esta feature, un `cargo build --release` produce un ejecutable que sigue
+# apuntando al servidor de desarrollo: si no hay `npm run dev` escuchando, la
+# ventana abre con «localhost refused to connect». El CLI de Tauri compila en
+# desarrollo con `--no-default-features`, así que dejarla por defecto no afecta
+# a `tauri dev`.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
 whisper = ["dep:whisper-rs"]
 
 [target.'cfg(windows)'.dependencies]

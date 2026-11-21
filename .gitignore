@@ -24,3 +24,6 @@ Thumbs.db
 
 # Pruebas locales de audio
 test-audio/
+
+# Capturas locales de revisión visual
+.shots/

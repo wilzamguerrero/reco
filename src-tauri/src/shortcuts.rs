@@ -13,12 +13,15 @@ use crate::error::{Error, Result};
 
 pub struct ShortcutManager {
     current: Mutex<Option<Shortcut>>,
+    /// Texto del último atajo registrado con éxito.
+    spec: Mutex<Option<String>>,
 }
 
 impl Default for ShortcutManager {
     fn default() -> Self {
         Self {
             current: Mutex::new(None),
+            spec: Mutex::new(None),
         }
     }
 }
@@ -38,11 +41,10 @@ impl ShortcutManager {
             }
         }
 
-        app.global_shortcut()
-            .register(shortcut)
-            .map_err(|e| Error::Config(format!("no se pudo registrar «{spec}»: {e}")))?;
-
         let app_handle = app.clone();
+        // `on_shortcut` ya registra el atajo y le asocia el manejador. Llamar
+        // además a `register` haría fallar esta llamada con "HotKey already
+        // registered" y dejaría el atajo sin manejador: el dictado no arrancaría.
         app.global_shortcut()
             .on_shortcut(shortcut, move |_app, _shortcut, event| {
                 let pressed = event.state() == ShortcutState::Pressed;
@@ -51,21 +53,28 @@ impl ShortcutManager {
                     serde_json::json!({ "pressed": pressed }),
                 );
             })
-            .map_err(|e| Error::Other(format!("no se pudo suscribir al atajo: {e}")))?;
+            .map_err(|e| Error::Config(format!("no se pudo registrar «{spec}»: {e}")))?;
 
         *self.current.lock().expect("shortcut lock envenenado") = Some(shortcut);
+        *self.spec.lock().expect("spec lock envenenado") = Some(spec.to_string());
         tracing::info!(spec, "atajo global registrado");
         Ok(())
+    }
+
+    /// Texto del atajo actualmente registrado.
+    pub fn current_spec(&self) -> Option<String> {
+        self.spec.lock().ok().and_then(|s| s.clone())
     }
 
     pub fn unregister_all(&self, app: &AppHandle) {
         let _ = app.global_shortcut().unregister_all();
         *self.current.lock().expect("shortcut lock envenenado") = None;
+        *self.spec.lock().expect("spec lock envenenado") = None;
     }
 }
 
 /// Traduce un texto de atajo a `Shortcut`.
-fn parse_shortcut(spec: &str) -> Result<Shortcut> {
+pub fn parse_shortcut(spec: &str) -> Result<Shortcut> {
     let mut modifiers = Modifiers::empty();
     let mut key: Option<Code> = None;
 

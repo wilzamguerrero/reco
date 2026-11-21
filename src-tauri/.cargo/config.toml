@@ -8,3 +8,33 @@
 
 [env]
 LIBCLANG_PATH = { value = "C:/Program Files/LLVM/bin", force = false }
+# cmake viaja dentro de las Build Tools pero no se añade al PATH del sistema.
+# El crate `cmake` consulta la variable CMAKE antes de buscar en PATH.
+CMAKE = { value = "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe", force = false }
+
+# --- Optimización de whisper.cpp en Windows -------------------------------
+#
+# El crate `cmake` (0.1.x, función `build`) reescribe `CMAKE_C_FLAGS_RELEASE` y
+# `CMAKE_CXX_FLAGS_RELEASE` **solo cuando él mismo elige el generador**
+# (`generator.is_none() && msvc`). Al hacerlo copia las banderas de Rust
+# descartando todas las que empiezan por `/O`, así que whisper.cpp acaba
+# compilado sin optimización.
+#
+# Consecuencia medida en un i7-3820 con el modelo `tiny` y un clip de 6 s:
+#   sin optimizar (bug)     ~24 s   · whisper.lib 6,3 MB
+#   con /O2                 ~2,5 s  · whisper.lib 1,8 MB
+# Es decir, un factor ~10. En el uso real eso es exactamente el «se queda
+# dando vueltas» con los ocho núcleos al 100 %.
+#
+# La solución es darle el generador ya elegido: entonces cmake no toca las
+# banderas y se usan las de CMake para Release (`/O2 /Ob2 /DNDEBUG`).
+#
+# `getenv_target_os` de cmake-rs consulta primero `CMAKE_GENERATOR_<triple>`,
+# así que basta con ese nombre. Cargo no admite `[target.<triple>.env]`, pero
+# sí deja declarar variables de entorno con cualquier nombre: en Linux y macOS
+# el triple no coincide, la variable se ignora y CMake usa su generador
+# habitual con `-O3`.
+#
+# Si tu Visual Studio no es 2022, redefine la variable con tu generador:
+#   $env:CMAKE_GENERATOR_x86_64_pc_windows_msvc = "Visual Studio 18 2026"
+CMAKE_GENERATOR_x86_64-pc-windows-msvc = { value = "Visual Studio 17 2022", force = false }

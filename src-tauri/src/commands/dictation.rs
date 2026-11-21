@@ -1,5 +1,6 @@
 //! Comandos de dictado.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -8,7 +9,7 @@ use tauri::{Emitter, State};
 use crate::dictation::inject::{self, InjectionReport};
 use crate::dictation::session::DictationSession;
 use crate::dictation::transcriber;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::state::AppState;
 
 /// Sesiones activas, indexadas por id. Solo puede haber una a la vez, pero se
@@ -18,6 +19,36 @@ pub struct ActiveDictation(pub Mutex<Option<DictationSession>>);
 impl Default for ActiveDictation {
     fn default() -> Self {
         Self(Mutex::new(None))
+    }
+}
+
+/// Marca que hay una transcripción en curso.
+///
+/// Al soltar el atajo la sesión sale del mutex enseguida, pero el modelo sigue
+/// trabajando en su hilo. Sin esta marca, pulsar otra vez crearía una segunda
+/// sesión y su transcripción se quedaría esperando el contexto de Whisper, que
+/// está tomado: el orbe giraría sin fin y el equipo acabaría con todos los
+/// núcleos ocupados. Se usa para rechazar el arranque y avisar por qué.
+pub struct TranscribingGuard(pub AtomicBool);
+
+impl Default for TranscribingGuard {
+    fn default() -> Self {
+        Self(AtomicBool::new(false))
+    }
+}
+
+impl TranscribingGuard {
+    /// Reserva la transcripción. `false` si ya había una en curso.
+    pub fn acquire(&self) -> bool {
+        !self.0.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn release(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
@@ -40,107 +71,47 @@ pub struct StopResponse {
 #[tauri::command]
 pub fn dictation_start(
     state: State<'_, AppState>,
-    active: State<'_, ActiveDictation>,
+    _active: State<'_, ActiveDictation>,
     mode: Option<String>,
 ) -> Result<StartResponse> {
-    let config = state.config_snapshot();
-
-    if !config.dictation.enabled {
-        return Err(Error::Config("el dictado está desactivado".into()));
-    }
-
-    let mut guard = active.0.lock().expect("dictado envenenado");
-    if guard.is_some() {
-        return Err(Error::Config("ya hay un dictado en curso".into()));
-    }
-
-    let session = DictationSession::start(config.recording.microphone_id.as_deref())?;
-    let id = session.id.to_string();
-    *guard = Some(session);
+    crate::dictation::controller::start(&state.app_handle)?;
 
     let _ = state.app_handle.emit(
         "dictation:state",
         serde_json::json!({ "state": "listening", "mode": mode }),
     );
 
-    Ok(StartResponse { session_id: id })
+    Ok(StartResponse {
+        session_id: String::new(),
+    })
 }
 
 #[tauri::command]
 pub async fn dictation_stop(
     state: State<'_, AppState>,
-    active: State<'_, ActiveDictation>,
+    _active: State<'_, ActiveDictation>,
 ) -> Result<StopResponse> {
-    let session = {
-        let mut guard = active.0.lock().expect("dictado envenenado");
-        guard
-            .take()
-            .ok_or_else(|| Error::Config("no hay ningún dictado en curso".into()))?
-    };
-
     let config = state.config_snapshot();
     let model_id = config.dictation.model_id.clone();
-    let language = if config.dictation.language == "auto" {
-        None
-    } else {
-        Some(config.dictation.language.clone())
-    };
-    let apply_polish = config.dictation.polish;
 
-    let _ = state.app_handle.emit(
-        "dictation:state",
-        serde_json::json!({ "state": "transcribing" }),
-    );
+    crate::dictation::controller::stop(&state.app_handle)?;
 
-    // La transcripción es CPU-intensiva: fuera del hilo de la UI.
-    let handle = state.app_handle.clone();
-    let model_for_task = model_id.clone();
-    let language_for_task = language.clone();
-    let cache = std::sync::Arc::clone(&state.transcribers);
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        session.stop_and_transcribe(
-            &cache,
-            &model_for_task,
-            language_for_task.as_deref(),
-            apply_polish,
-        )
-    })
-    .await
-    .map_err(|e| Error::Other(format!("la transcripción se interrumpió: {e}")))??;
-
-    let _ = handle.emit(
-        "dictation:state",
-        serde_json::json!({ "state": "idle" }),
-    );
-
+    // El texto llega por `dictation:result` cuando termina la transcripción.
     Ok(StopResponse {
-        text: result.text,
-        language: result.language,
+        text: String::new(),
+        language: None,
         duration_ms: 0,
         model_id,
-        polish_applied: apply_polish,
+        polish_applied: config.dictation.polish,
     })
 }
 
 #[tauri::command]
 pub fn dictation_cancel(
     state: State<'_, AppState>,
-    active: State<'_, ActiveDictation>,
+    _active: State<'_, ActiveDictation>,
 ) -> Result<()> {
-    let session = {
-        let mut guard = active.0.lock().expect("dictado envenenado");
-        guard.take()
-    };
-
-    if let Some(session) = session {
-        session.cancel();
-    }
-
-    let _ = state.app_handle.emit(
-        "dictation:state",
-        serde_json::json!({ "state": "idle" }),
-    );
-    Ok(())
+    crate::dictation::controller::cancel(&state.app_handle)
 }
 
 #[derive(Debug, Serialize)]

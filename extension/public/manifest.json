@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "name": "RECO — Dictado y Grabación a Notion",
+  "version": "1.0.0",
+  "description": "Dictado continuo tipo Wispr Flow donde pongas el cursor y grabación de pantalla tipo Loom con subida directa a Notion.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "RECO",
+    "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "sw.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "commands": {
+    "toggle-dictation": {
+      "suggested_key": {
+        "default": "Alt+Shift+D",
+        "mac": "Alt+Shift+D"
+      },
+      "description": "Iniciar o detener el dictado por voz en el cursor"
+    },
+    "toggle-recording": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Alt+Shift+R"
+      },
+      "description": "Iniciar o detener grabación de pantalla hacia Notion"
+    },
+    "pause-recording": {
+      "suggested_key": {
+        "default": "Alt+Shift+P",
+        "mac": "Alt+Shift+P"
+      },
+      "description": "Pausar o reanudar la grabación actual"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "desktopCapture",
+    "identity",
+    "offscreen",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://api.notion.com/*",
+    "https://www.notion.so/*",
+    "<all_urls>"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

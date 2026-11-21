@@ -9,6 +9,7 @@ pub mod commands;
 pub mod config;
 pub mod dictation;
 pub mod error;
+pub mod indicator;
 pub mod notion;
 pub mod platform;
 pub mod recording;
@@ -20,7 +21,7 @@ pub mod tray;
 
 use tauri::Manager;
 
-use crate::commands::dictation::ActiveDictation;
+use crate::commands::dictation::{ActiveDictation, TranscribingGuard};
 use crate::commands::recording::ActiveRecording;
 use crate::dictation::hotkey::HotkeyTracker;
 use crate::shortcuts::ShortcutManager;
@@ -48,6 +49,7 @@ pub fn run() {
 
             app.manage(state);
             app.manage(ActiveDictation::default());
+            app.manage(TranscribingGuard::default());
             app.manage(ActiveRecording::default());
             app.manage(HotkeyTracker::default());
             app.manage(manager);
@@ -66,6 +68,9 @@ pub fn run() {
             }
 
             tray::install(app.handle())?;
+
+            // La ventana se abre abajo, junto al orbe, no en el centro.
+            crate::indicator::place_main(app.handle());
 
             tracing::info!("RECO iniciado");
             Ok(())
@@ -94,6 +99,7 @@ pub fn run() {
             commands::config::secrets_status,
             commands::config::secrets_set,
             commands::config::secrets_clear,
+            commands::config::shortcut_validate,
             // diagnóstico
             commands::diagnostics::diagnostics_run,
             // dictado

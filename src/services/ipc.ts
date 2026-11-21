@@ -35,6 +35,8 @@ export const ipc = {
       tauriInvoke<void>("secrets_set", { key, value }),
     secretsClear: (key: SecretName) =>
       tauriInvoke<void>("secrets_clear", { key }),
+    validateShortcut: (spec: string) =>
+      tauriInvoke<boolean>("shortcut_validate", { spec }),
   },
 
   diagnostics: {

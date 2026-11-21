@@ -204,6 +204,7 @@ export interface CoreEvents {
   "dictation:state": { state: DictationState };
   "dictation:level": { rms: number };
   "dictation:result": { text: string; language: string | null };
+  "dictation:notice": { message: string };
   "models:state": {
     id: string;
     state: "downloading" | "installed" | "failed";

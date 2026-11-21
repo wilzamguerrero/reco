@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "indicator",
+  "description": "La píldora flotante solo escucha eventos del núcleo. No invoca comandos ni abre diálogos: si se comprometiera, no tendría por dónde actuar.",
+  "windows": ["indicator"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

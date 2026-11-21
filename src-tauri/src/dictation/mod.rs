@@ -4,6 +4,7 @@
 //! tocar los otros (ver `ARCHITECTURE.md` §5).
 
 pub mod audio;
+pub mod controller;
 pub mod download;
 pub mod engine;
 pub mod hotkey;

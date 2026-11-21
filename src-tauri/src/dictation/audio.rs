@@ -20,7 +20,12 @@ pub struct MicrophoneRecorder {
 impl MicrophoneRecorder {
     /// Crea el grabador. Los argumentos de captura se configuran aquí porque
     /// algunos backends no permiten cambiar el dispositivo a mitad de captura.
-    pub fn new(device_id: Option<&str>) -> Result<Self> {
+    ///
+    /// `on_level` recibe el RMS de cada bloque (0..1) para el medidor visual.
+    pub fn new<F>(device_id: Option<&str>, on_level: F) -> Result<Self>
+    where
+        F: Fn(f32) + Send + 'static,
+    {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let buffer = Arc::new(Mutex::new(Vec::new()));
 
@@ -39,8 +44,18 @@ impl MicrophoneRecorder {
                 let stream = match device.build_input_stream(
                     &config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        let mut out = sink.lock().expect("buffer envenenado");
-                        resample_and_push(&mut out, data, config.sample_rate.0, config.channels);
+                        // Se remuestrea **fuera** del candado: el callback de
+                        // audio corre en un hilo de tiempo real y no puede
+                        // quedarse esperando a que otro hilo suelte el buffer.
+                        let mono = resample(data, config.sample_rate.0, config.channels);
+                        if let Ok(mut out) = sink.lock() {
+                            out.extend_from_slice(&mono);
+                        }
+
+                        // Nivel para el indicador, a partir del bloque original.
+                        if let Some(rms) = rms_of(data) {
+                            on_level(rms);
+                        }
                     },
                     err_fn,
                     None,
@@ -80,11 +95,14 @@ impl MicrophoneRecorder {
             let _ = handle.join();
         }
 
+        // `take` en vez de `clone`: el buffer puede ser de varios MB y ya no lo
+        // necesita nadie más; copiarlo solo alarga el silencio tras soltar el
+        // atajo.
         let samples = self
             .buffer
             .lock()
-            .expect("buffer envenenado")
-            .clone();
+            .map(|mut b| std::mem::take(&mut *b))
+            .unwrap_or_default();
 
         AudioBuffer {
             samples,
@@ -121,36 +139,71 @@ fn pick_config(device: &cpal::Device) -> Result<cpal::StreamConfig> {
     Ok(supported.config())
 }
 
-/// Remuestrea (por decimación lineal) y mezcla a mono.
+/// Nivel eficaz (RMS) normalizado a 0..1. `None` si el bloque está vacío.
+fn rms_of(data: &[f32]) -> Option<f32> {
+    if data.is_empty() {
+        return None;
+    }
+    let sum: f32 = data.iter().map(|s| s * s).sum();
+    Some((sum / data.len() as f32).sqrt().clamp(0.0, 1.0))
+}
+
+/// Remuestrea (por promedio de ventana) y mezcla a mono.
 ///
-/// Es suficiente para voz: Whisper vuelve a normalizar internamente y el error
-/// de un diezmado lineal a 16 kHz es despreciable para STT.
-fn resample_and_push(out: &mut Vec<i16>, data: &[f32], rate: u32, channels: u16) {
+/// No basta con tomar una muestra de cada N: al bajar de 48 a 16 kHz, todo lo
+/// que haya por encima de 8 kHz se pliega sobre la banda de voz (aliasing) y
+/// ensucia la transcripción. Promediar la ventana actúa de filtro paso bajo
+/// barato y, en la práctica, se nota en las palabras que el modelo acierta.
+///
+/// Devuelve las muestras en lugar de escribirlas en el buffer del llamador: así
+/// el callback de audio no tiene que retener el `Mutex` mientras remuestrea, que
+/// es justo lo que provoca chasquidos y bloqueos cuando el modelo está ocupando
+/// la CPU.
+fn resample(data: &[f32], rate: u32, channels: u16) -> Vec<i16> {
     if channels == 0 || rate == 0 {
-        return;
+        return Vec::new();
     }
 
     let channels = channels as usize;
     let frames = data.len() / channels;
-    let ratio = rate as f32 / SAMPLE_RATE as f32;
+    if frames == 0 {
+        return Vec::new();
+    }
 
-    let step = ratio.max(1.0);
+    // Media de los canales de un frame → mono.
+    let mono_at = |frame: usize| -> f32 {
+        let start = frame * channels;
+        data[start..start + channels].iter().sum::<f32>() / channels as f32
+    };
+
+    let step = (rate as f32 / SAMPLE_RATE as f32).max(1.0);
     let output_frames = (frames as f32 / step) as usize;
-    out.reserve(output_frames);
+    let mut out = Vec::with_capacity(output_frames);
 
     for i in 0..output_frames {
-        let src = (i as f32 * step) as usize;
-        if src >= frames {
+        let start = (i as f32 * step) as usize;
+        let end = (((i + 1) as f32 * step) as usize).min(frames);
+        if start >= frames {
             break;
         }
 
-        // Media de los canales del frame → mono.
-        let start = src * channels;
-        let sum: f32 = data[start..start + channels].iter().sum();
-        let mono = sum / channels as f32;
+        let end = end.max(start + 1);
+        let mut sum = 0.0f32;
+        for frame in start..end {
+            sum += mono_at(frame);
+        }
+        let mono = sum / (end - start) as f32;
 
         out.push((mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
     }
+
+    out
+}
+
+/// Compatibilidad con las pruebas: remuestrea y anexa al buffer.
+#[cfg(test)]
+fn resample_and_push(out: &mut Vec<i16>, data: &[f32], rate: u32, channels: u16) {
+    out.extend_from_slice(&resample(data, rate, channels));
 }
 
 #[cfg(test)]

@@ -41,7 +41,16 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
+    // El icono se toma del bundle de la aplicación. `tauri.conf.json` ya no
+    // declara `trayIcon`: si lo hiciera, Tauri crearía un segundo icono propio
+    // además de este y aparecerían dos en la bandeja.
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .ok_or_else(|| tauri::Error::AssetNotFound("falta el icono de la aplicación".into()))?;
+
     TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("RECO")
@@ -120,8 +129,10 @@ fn notify_error(app: &AppHandle, title: &str, body: &str) {
 /// Muestra la ventana principal y notifica a la UI qué sección abrir.
 fn show_main(app: &AppHandle, section: &str) {
     if let Some(window) = app.get_webview_window("main") {
+        // La ventana no tiene barra de título: si el usuario la movió o la
+        // maximizó, al reabrirla desde la bandeja debe volver junto al orbe.
+        crate::indicator::place_main(app);
         let _ = window.show();
-        let _ = window.unminimize();
         let _ = window.set_focus();
     }
     use tauri::Emitter;

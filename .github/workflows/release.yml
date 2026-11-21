@@ -1,10 +1,20 @@
 name: Release
 
+# Publica binarios portables: cada plataforma baja un solo archivo y se ejecuta
+# sin instalar nada. No se generan instaladores a propósito.
+#
+# En Windows el .exe es autocontenido. En Linux se empaqueta además el .deb
+# porque el binario necesita las bibliotecas del sistema (WebKitGTK, ALSA), que
+# no se pueden enlazar estáticamente sin recompilar medio sistema.
+
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,11 +23,14 @@ jobs:
       matrix:
         include:
           - platform: windows-latest
-            args: ""
+            target: x86_64-pc-windows-msvc
+            asset: reco-windows-x64.exe
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            target: universal-apple-darwin
+            asset: reco-macos-universal
           - platform: ubuntu-22.04
-            args: ""
+            target: x86_64-unknown-linux-gnu
+            asset: reco-linux-x64
 
     runs-on: ${{ matrix.platform }}
 
@@ -36,10 +49,13 @@ jobs:
             libasound2-dev \
             build-essential \
             curl \
-            wget
+            wget \
+            file
 
       - name: Instalar Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache de Rust
         uses: swatinem/rust-cache@v2
@@ -56,16 +72,84 @@ jobs:
         run: npm ci
 
       - name: Pruebas del núcleo
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --manifest-path src-tauri/Cargo.toml --features whisper
 
-      - name: Compilar y empaquetar
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Se compila el binario directamente, sin el empaquetador: el objetivo es
+      # un archivo ejecutable, no un instalador.
+      #
+      # `custom-protocol` (activa por defecto en Cargo.toml) es imprescindible
+      # aquí: es la que incrusta el frontend compilado en el binario. Sin ella
+      # el ejecutable busca http://localhost:1420 y la ventana abre con
+      # «localhost refused to connect».
+      - name: Compilar binario portable
+        run: |
+          npm run build
+          cargo build --release --manifest-path src-tauri/Cargo.toml \
+            --features whisper,custom-protocol --target ${{ matrix.target }}
+
+      # Comprueba que los assets del frontend viajan dentro del binario.
+      #
+      # No sirve buscar «localhost:1420»: `devUrl` se compila siempre como
+      # constante y el runtime elige entre esa y `tauri://localhost`, así que
+      # la cadena aparece incluso cuando todo está bien. El HTML va comprimido,
+      # pero los nombres con hash de JS y CSS quedan en claro.
+      - name: Comprobar que el frontend está incrustado
+        shell: bash
+        run: |
+          BIN="src-tauri/target/${{ matrix.target }}/release/reco"
+          if [ "${{ matrix.platform }}" = "windows-latest" ]; then
+            BIN="$BIN.exe"
+          fi
+          python3 - "$BIN" <<'PY'
+          import sys, pathlib, re
+          data = pathlib.Path(sys.argv[1]).read_bytes()
+          js = re.search(rb"assets/main-[A-Za-z0-9_-]+\.js", data)
+          css = re.search(rb"assets/main-[A-Za-z0-9_-]+\.css", data)
+          if not (js and css):
+              sys.exit("Faltan los assets del frontend: revisa custom-protocol y npm run build")
+          print("Frontend incrustado:", js.group().decode(), css.group().decode())
+          PY
+
+      - name: Preparar el archivo publicado (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "src-tauri/target/${{ matrix.target }}/release/reco.exe" \
+             "out/${{ matrix.asset }}"
+
+      - name: Preparar el archivo publicado (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "src-tauri/target/${{ matrix.target }}/release/reco" \
+             "out/${{ matrix.asset }}"
+          chmod +x "out/${{ matrix.asset }}"
+
+      - name: Preparar el archivo publicado (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          mkdir -p out
+          cp "src-tauri/target/${{ matrix.target }}/release/reco" \
+             "out/${{ matrix.asset }}"
+          chmod +x "out/${{ matrix.asset }}"
+
+      - name: Publicar en la release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "RECO ${{ github.ref_name }}"
-          releaseBody: "Instaladores generados automáticamente para Windows, macOS y Linux."
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          draft: true
+          name: "RECO ${{ github.ref_name }}"
+          body: |
+            Binarios portables: descarga el de tu sistema y ejecútalo. No hace
+            falta instalar nada.
+
+            - **Windows**: `reco-windows-x64.exe`
+            - **macOS**: `reco-macos-universal` (permite ejecutarlo con
+              `chmod +x` y doble clic; la primera vez macOS pedirá confirmación
+              porque no está firmado)
+            - **Linux**: `reco-linux-x64`. Necesita WebKitGTK y ALSA instalados
+              (`libwebkit2gtk-4.1-0`, `libasound2`).
+          files: out/${{ matrix.asset }}

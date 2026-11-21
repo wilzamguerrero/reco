@@ -22,5 +22,12 @@ export default defineConfig({
     target: "chrome110",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      // Dos ventanas = dos documentos: el shell principal y el indicador.
+      input: {
+        main: "index.html",
+        indicator: "indicator.html",
+      },
+    },
   },
 });

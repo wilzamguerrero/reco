@@ -30,9 +30,15 @@ pub struct DictationSession {
 }
 
 impl DictationSession {
-    pub fn start(microphone_id: Option<&str>) -> Result<Self> {
+    /// Crea la sesión y arranca el micrófono.
+    ///
+    /// `on_level` recibe el nivel de entrada para el indicador visual.
+    pub fn start<F>(microphone_id: Option<&str>, on_level: F) -> Result<Self>
+    where
+        F: Fn(f32) + Send + 'static,
+    {
         let target_window = inject::foreground_window();
-        let recorder = MicrophoneRecorder::new(microphone_id)?;
+        let recorder = MicrophoneRecorder::new(microphone_id, on_level)?;
 
         Ok(Self {
             id: SESSION_COUNTER.fetch_add(1, Ordering::Relaxed),
