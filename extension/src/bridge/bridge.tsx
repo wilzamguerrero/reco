@@ -26,6 +26,7 @@ function BridgeApp() {
     let disposed = false;
 
     async function boot() {
+      void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
       const cfg = await getConfig();
       if (disposed) return;
 
@@ -37,10 +38,9 @@ function BridgeApp() {
           setStatus(
             cfg.dictation.engine === "chrome"
               ? "Escuchando (Chrome) · Coloca el cursor donde quieras escribir"
-              : cfg.dictation.engine === "moonshine_tiny"
-                ? "Escuchando (Moonshine local) · Ultra rápido en tu equipo"
-                : "Escuchando (Whisper local) · Habla y haz micro-pausas",
+              : "Escuchando (Whisper local) · Habla y haz micro-pausas",
           );
+          void chrome.runtime.sendMessage({ type: "DICTATION_STATUS", status: null } satisfies ExtMessage);
           void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
         },
         onLevel(level: number) {
@@ -81,6 +81,10 @@ function BridgeApp() {
               model: cfg.dictation.engine,
               onStatus(s) {
                 setStatus(s);
+                void chrome.runtime.sendMessage({
+                  type: "DICTATION_STATUS",
+                  status: s || null,
+                } satisfies ExtMessage);
               },
             });
 

@@ -11,6 +11,7 @@
 
 import { cleanDictatedChunk } from "./polish";
 import type { SpeechEngineHandle, SpeechEngineOptions } from "./speechEngine";
+import { getCachedModels, markModelCached } from "./storage";
 import type { SpeechEngineType } from "./types";
 
 export type LocalAsrModel = Exclude<SpeechEngineType, "chrome">;
@@ -18,17 +19,11 @@ export type LocalAsrModel = Exclude<SpeechEngineType, "chrome">;
 interface ModelSpec {
   id: string;
   label: string;
-  isMoonshine?: boolean;
 }
 
 const MODELS: Record<LocalAsrModel, ModelSpec> = {
-  whisper_tiny: { id: "Xenova/whisper-tiny", label: "Whisper S" },
-  whisper_base: { id: "Xenova/whisper-base", label: "Whisper M" },
-  moonshine_tiny: {
-    id: "onnx-community/moonshine-tiny-ONNX",
-    label: "Moonshine",
-    isMoonshine: true,
-  },
+  whisper_tiny: { id: "onnx-community/whisper-tiny", label: "Whisper S" },
+  whisper_base: { id: "onnx-community/whisper-base", label: "Whisper M" },
 };
 
 type AsrPipeline = (
@@ -59,7 +54,14 @@ async function loadLocalPipeline(
   if (cached) return cached;
 
   const loader = (async () => {
-    onProgress?.(`Iniciando ${spec.label} local…`);
+    const cachedMap = await getCachedModels().catch(() => ({} as Record<string, boolean>));
+    const alreadyCached = Boolean(cachedMap[modelKey]);
+
+    onProgress?.(
+      alreadyCached
+        ? `Cargando ${spec.label} desde caché…`
+        : `Preparando descarga de ${spec.label}…`,
+    );
     const { pipeline, env } = await import("@huggingface/transformers");
 
     env.allowLocalModels = false;
@@ -74,13 +76,29 @@ async function loadLocalPipeline(
     }
 
     const hasWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
-    const progressCb = (info: { status?: string; progress?: number }) => {
+    let lastPct = -1;
+    const progressCb = (info: { status?: string; progress?: number; file?: string }) => {
+      if (alreadyCached) {
+        if (info.status === "ready") {
+          onProgress?.(`Iniciando ${spec.label} en ${hasWebGpu ? "GPU" : "CPU"}…`);
+        }
+        return;
+      }
       if (info.status === "progress" && typeof info.progress === "number") {
-        onProgress?.(`Descargando ${spec.label}: ${Math.round(info.progress)}%`);
+        const pct = Math.round(info.progress);
+        if (pct !== lastPct) {
+          lastPct = pct;
+          onProgress?.(`Descargando ${spec.label} (1 sola vez) · ${pct}%`);
+        }
+      } else if (info.status === "ready") {
+        onProgress?.(`Iniciando ${spec.label} en ${hasWebGpu ? "GPU" : "CPU"}…`);
       }
     };
 
-    const tryCreate = async (device: "webgpu" | "wasm", dtype?: "q8" | "fp32") => {
+    const tryCreate = async (
+      device: "webgpu" | "wasm",
+      dtype?: "q8" | "fp32" | Record<string, string>,
+    ) => {
       const pipeOpts: Record<string, unknown> = {
         device,
         progress_callback: progressCb,
@@ -93,19 +111,31 @@ async function loadLocalPipeline(
       )) as unknown as AsrPipeline;
     };
 
-    // Fast path: WebGPU (q8) -> WASM (q8) -> WASM (default)
+    let pipe: AsrPipeline | null = null;
     if (hasWebGpu) {
       try {
-        return await tryCreate("webgpu", "q8");
+        pipe = await tryCreate("webgpu", {
+          encoder_model: "fp32",
+          decoder_model_merged: "q4",
+        });
       } catch {
-        // Fallback smoothly to local WASM
+        try {
+          pipe = await tryCreate("webgpu", "q8");
+        } catch {
+          // Fallback smoothly to local WASM
+        }
       }
     }
-    try {
-      return await tryCreate("wasm", "q8");
-    } catch {
-      return await tryCreate("wasm");
+    if (!pipe) {
+      try {
+        pipe = await tryCreate("wasm", "q8");
+      } catch {
+        pipe = await tryCreate("wasm");
+      }
     }
+
+    await markModelCached(modelKey).catch(() => {});
+    return pipe;
   })();
 
   pipelineCache.set(spec.id, loader);
@@ -183,14 +213,11 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
     try {
       while (pendingQueue.length > 0 && active) {
         const audio = pendingQueue.shift()!;
-        const inferOpts = spec.isMoonshine
-          ? {}
-          : {
-              task: "transcribe",
-              ...(mapWhisperLang(lang) ? { language: mapWhisperLang(lang) } : {}),
-              chunk_length_s: 30,
-              stride_length_s: 5,
-            };
+        const inferOpts = {
+          task: "transcribe",
+          ...(mapWhisperLang(lang) ? { language: mapWhisperLang(lang) } : {}),
+          return_timestamps: false,
+        };
 
         const result = await asr(audio, inferOpts);
         const raw = Array.isArray(result) ? result[0]?.text ?? "" : result?.text ?? "";

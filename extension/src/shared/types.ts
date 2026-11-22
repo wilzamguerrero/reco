@@ -1,6 +1,6 @@
 export type DictationPhase = "idle" | "listening" | "inserting" | "error";
 
-export type SpeechEngineType = "chrome" | "whisper_tiny" | "whisper_base" | "moonshine_tiny";
+export type SpeechEngineType = "chrome" | "whisper_tiny" | "whisper_base";
 
 export type RecordingPhase = "idle" | "recording" | "paused" | "uploading";
 
@@ -107,6 +107,7 @@ export interface LiveState {
   dictationStartedAt: number | null;
   dictationInterim: string;
   dictationTranscript: string;
+  dictationStatus: string | null;
   dictationError: string | null;
   dictationLevel: number;
   dictationHostTabId: number | null;
@@ -142,6 +143,7 @@ export type ExtMessage =
   | { type: "DICTATION_START"; targetTabId?: number }
   | { type: "DICTATION_STOP" }
   | { type: "DICTATION_BRIDGE_READY"; tabId?: number }
+  | { type: "DICTATION_STATUS"; status: string | null }
   | { type: "DICTATION_INTERIM"; text: string }
   | { type: "DICTATION_LIVE"; payload: LiveSpeechPayload }
   | { type: "DICTATION_FINAL"; text: string }

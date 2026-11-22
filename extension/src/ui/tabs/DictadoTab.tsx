@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { downloadWindowsNativeActivator } from "../../shared/nativeInstaller";
+import { getCachedModels } from "../../shared/storage";
 import type {
   AppConfig,
   DictationNote,
@@ -10,10 +11,9 @@ import type {
 import { Icon } from "../components/Icon";
 
 const ENGINES: { id: SpeechEngineType; label: string; tip: string }[] = [
-  { id: "chrome", label: "CHROME", tip: "Web Speech en tiempo real (0 MB, requiere internet)" },
+  { id: "chrome", label: "CHROME", tip: "Web Speech en tiempo real (0 MB, multilingüe)" },
   { id: "whisper_tiny", label: "WHISPER S", tip: "Whisper Tiny local (multilingüe ES/EN, ~40 MB, offline)" },
   { id: "whisper_base", label: "WHISPER M", tip: "Whisper Base local (multilingüe ES/EN, ~75 MB, más preciso)" },
-  { id: "moonshine_tiny", label: "MOONSHINE", tip: "Moonshine Tiny local (ultra rápido, ~27 MB, optimizado EN)" },
 ];
 
 const LANGS = [
@@ -52,9 +52,21 @@ export function DictadoTab({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [nativeTesting, setNativeTesting] = useState(false);
   const [nativeStatusMsg, setNativeStatusMsg] = useState<string | null>(null);
+  const [cachedModels, setCachedModels] = useState<Record<string, boolean>>({});
   const d = config.dictation;
   const listening = live.dictationPhase === "listening";
   const extId = chrome.runtime.id;
+
+  useEffect(() => {
+    void getCachedModels().then(setCachedModels);
+    const onStorage = (changes: Record<string, chrome.storage.StorageChange>) => {
+      if (changes.reco_ext_cached_models_v1) {
+        void getCachedModels().then(setCachedModels);
+      }
+    };
+    chrome.storage.onChanged.addListener(onStorage);
+    return () => chrome.storage.onChanged.removeListener(onStorage);
+  }, []);
 
   const copyNote = (id: string, text: string) => {
     const clean = text.trim();
@@ -208,18 +220,22 @@ export function DictadoTab({
       <div className="pane-row">
         <span className="pane-label">Motor</span>
         <div className="chips">
-          {ENGINES.map((eng) => (
-            <button
-              key={eng.id}
-              type="button"
-              disabled={listening}
-              title={eng.tip}
-              className={`chip is-cyan ${d.engine === eng.id ? "is-active" : ""}`}
-              onClick={() => void updateConfig({ dictation: { ...d, engine: eng.id } })}
-            >
-              {eng.label}
-            </button>
-          ))}
+          {ENGINES.map((eng) => {
+            const isCached = eng.id !== "chrome" && Boolean(cachedModels[eng.id]);
+            return (
+              <button
+                key={eng.id}
+                type="button"
+                disabled={listening}
+                title={isCached ? `${eng.tip} · Descargado en caché` : eng.tip}
+                className={`chip is-cyan ${d.engine === eng.id ? "is-active" : ""}`}
+                onClick={() => void updateConfig({ dictation: { ...d, engine: eng.id } })}
+              >
+                {eng.label}
+                {isCached ? " ✓" : ""}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -274,6 +290,12 @@ export function DictadoTab({
           </button>
         )}
       </div>
+
+      {live.dictationStatus && (
+        <div className="ok-box" style={{ fontFamily: "var(--mono)", fontSize: 10.5 }}>
+          {live.dictationStatus}
+        </div>
+      )}
 
       {live.dictationError && <div className="alert-box">{live.dictationError}</div>}
 

@@ -3,6 +3,7 @@ import type { AppConfig, DictationNote, RecordingItem } from "./types";
 const CONFIG_KEY = "reco_ext_config_v1";
 const RECORDINGS_KEY = "reco_ext_recordings_v1";
 const DICTATION_HISTORY_KEY = "reco_ext_dictation_history_v1";
+const CACHED_MODELS_KEY = "reco_ext_cached_models_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
   dictation: {
@@ -41,8 +42,16 @@ export const DEFAULT_CONFIG: AppConfig = {
 };
 
 function mergeConfig(raw: Partial<AppConfig> | undefined): AppConfig {
+  const mergedDict = { ...DEFAULT_CONFIG.dictation, ...(raw?.dictation ?? {}) };
+  if (
+    mergedDict.engine !== "chrome" &&
+    mergedDict.engine !== "whisper_tiny" &&
+    mergedDict.engine !== "whisper_base"
+  ) {
+    mergedDict.engine = "whisper_base";
+  }
   return {
-    dictation: { ...DEFAULT_CONFIG.dictation, ...(raw?.dictation ?? {}) },
+    dictation: mergedDict,
     recording: { ...DEFAULT_CONFIG.recording, ...(raw?.recording ?? {}) },
     notion: { ...DEFAULT_CONFIG.notion, ...(raw?.notion ?? {}) },
     orbPosition: raw?.orbPosition ?? DEFAULT_CONFIG.orbPosition,
@@ -112,4 +121,16 @@ export async function removeDictationNote(id: string): Promise<DictationNote[]> 
 
 export async function clearDictationHistory(): Promise<void> {
   await chrome.storage.local.set({ [DICTATION_HISTORY_KEY]: [] });
+}
+
+export async function getCachedModels(): Promise<Record<string, boolean>> {
+  const data = await chrome.storage.local.get(CACHED_MODELS_KEY);
+  const raw = data[CACHED_MODELS_KEY];
+  return raw && typeof raw === "object" ? (raw as Record<string, boolean>) : {};
+}
+
+export async function markModelCached(modelKey: string): Promise<void> {
+  const cur = await getCachedModels();
+  if (cur[modelKey]) return;
+  await chrome.storage.local.set({ [CACHED_MODELS_KEY]: { ...cur, [modelKey]: true } });
 }

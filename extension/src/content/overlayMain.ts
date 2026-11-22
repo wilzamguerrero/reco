@@ -16,7 +16,7 @@ import type { AppConfig, ExtMessage, LiveState } from "../shared/types";
 import { createDrawOverlay } from "./drawOverlay";
 
 const HOST_ID = "reco-ext-host";
-const GUARD_KEY = "__recoOverlayLoaded_v14";
+const GUARD_KEY = "__recoOverlayLoaded_v15";
 const CONTROL_SIZE = 42;
 const TILE_GAP = 8;
 const TILE_STEP = CONTROL_SIZE + TILE_GAP;
@@ -176,6 +176,7 @@ function runOverlay() {
     if (state.recordingPhase === "paused") return "paused";
     if (state.recordingPhase === "uploading" || state.uploadActiveId) return "uploading";
     if (state.dictationPhase === "listening") {
+      if (state.dictationStatus) return "starting";
       const hasInterim = state.dictationInterim.trim().length > 0;
       const hasVoice = state.dictationLevel > 0.045;
       const recentlySpoke = Date.now() - lastSpeechAt < 600;
@@ -820,8 +821,9 @@ function runOverlay() {
 
     fabGroupEl.classList.toggle("is-open", menuOpen && idle);
 
-    if (toastText) {
-      toastEl.textContent = toastText;
+    const activeToast = currentState?.dictationStatus || toastText;
+    if (activeToast) {
+      toastEl.textContent = activeToast;
       toastEl.classList.add("is-visible");
     } else {
       toastEl.classList.remove("is-visible");

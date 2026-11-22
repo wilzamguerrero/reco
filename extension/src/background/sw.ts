@@ -22,6 +22,7 @@ let state: LiveState = {
   dictationStartedAt: null,
   dictationInterim: "",
   dictationTranscript: "",
+  dictationStatus: null,
   dictationError: null,
   dictationLevel: 0,
   dictationHostTabId: null,
@@ -335,6 +336,8 @@ async function startDictation(explicitTabId?: number) {
     dictationStartedAt: startedAt,
     dictationInterim: "",
     dictationTranscript: "",
+    dictationStatus:
+      cfg.dictation.engine === "chrome" ? null : "Preparando modelo local…",
     dictationError: null,
     dictationLevel: 0,
   };
@@ -346,7 +349,10 @@ async function startDictation(explicitTabId?: number) {
   }
 
   bridgeReady = false;
-  if (bridgeWakeTimer) clearTimeout(bridgeWakeTimer);
+  if (bridgeWakeTimer) {
+    clearTimeout(bridgeWakeTimer);
+    bridgeWakeTimer = null;
+  }
 
   const tab = await chrome.tabs.create({
     url: BRIDGE_URL,
@@ -355,21 +361,6 @@ async function startDictation(explicitTabId?: number) {
   });
   bridgeTabId = tab.id ?? null;
   state.dictationHostTabId = bridgeTabId;
-
-  // Si Chrome suspende la pestaña en segundo plano antes de arrancar SpeechRecognition,
-  // la despertamos 120 ms y devolvemos el foco al instante a la pestaña del usuario.
-  const createdId = bridgeTabId;
-  bridgeWakeTimer = setTimeout(() => {
-    if (bridgeReady || !createdId || bridgeTabId !== createdId) return;
-    const returnTo = lastTargetTabId;
-    void chrome.tabs.update(createdId, { active: true }).then(() => {
-      if (returnTo !== null) {
-        setTimeout(() => {
-          void chrome.tabs.update(returnTo, { active: true }).catch(() => {});
-        }, 120);
-      }
-    }).catch(() => {});
-  }, 1500);
 }
 
 async function stopDictation() {
@@ -383,6 +374,7 @@ async function stopDictation() {
     dictationPhase: "idle",
     dictationStartedAt: null,
     dictationInterim: "",
+    dictationStatus: null,
     dictationLevel: 0,
     dictationHostTabId: null,
   };
@@ -643,6 +635,12 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
       clearTimeout(bridgeWakeTimer);
       bridgeWakeTimer = null;
     }
+    return;
+  }
+
+  if (msg.type === "DICTATION_STATUS") {
+    state.dictationStatus = msg.status;
+    broadcastStateFast();
     return;
   }
 

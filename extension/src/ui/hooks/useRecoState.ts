@@ -33,6 +33,7 @@ const INITIAL_LIVE: LiveState = {
   dictationStartedAt: null,
   dictationInterim: "",
   dictationTranscript: "",
+  dictationStatus: null,
   dictationError: null,
   dictationLevel: 0,
   dictationHostTabId: null,
