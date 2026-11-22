@@ -1,7 +1,8 @@
-import type { AppConfig, RecordingItem } from "./types";
+import type { AppConfig, DictationNote, RecordingItem } from "./types";
 
 const CONFIG_KEY = "reco_ext_config_v1";
 const RECORDINGS_KEY = "reco_ext_recordings_v1";
+const DICTATION_HISTORY_KEY = "reco_ext_dictation_history_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
   dictation: {
@@ -10,6 +11,7 @@ export const DEFAULT_CONFIG: AppConfig = {
     smartSpacing: true,
     autoCapitalize: true,
     showFloatingOrb: true,
+    desktopTyping: true,
   },
   recording: {
     quality: "medium",
@@ -83,4 +85,30 @@ export async function removeRecording(id: string): Promise<RecordingItem[]> {
   const next = list.filter((r) => r.id !== id);
   await chrome.storage.local.set({ [RECORDINGS_KEY]: next });
   return next;
+}
+
+export async function getDictationHistory(): Promise<DictationNote[]> {
+  const data = await chrome.storage.local.get(DICTATION_HISTORY_KEY);
+  const list = data[DICTATION_HISTORY_KEY];
+  return Array.isArray(list) ? (list as DictationNote[]) : [];
+}
+
+export async function upsertDictationNote(note: DictationNote): Promise<DictationNote[]> {
+  const list = await getDictationHistory();
+  const idx = list.findIndex((n) => n.id === note.id);
+  const next = idx >= 0 ? list.map((n, i) => (i === idx ? note : n)) : [note, ...list];
+  const capped = next.slice(0, 30);
+  await chrome.storage.local.set({ [DICTATION_HISTORY_KEY]: capped });
+  return capped;
+}
+
+export async function removeDictationNote(id: string): Promise<DictationNote[]> {
+  const list = await getDictationHistory();
+  const next = list.filter((n) => n.id !== id);
+  await chrome.storage.local.set({ [DICTATION_HISTORY_KEY]: next });
+  return next;
+}
+
+export async function clearDictationHistory(): Promise<void> {
+  await chrome.storage.local.set({ [DICTATION_HISTORY_KEY]: [] });
 }

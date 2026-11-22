@@ -1,18 +1,16 @@
 /**
  * Motor de dictado continuo por voz (SpeechRecognition + medidor RMS).
  *
- * Basado en `iii/src/core/voice/dictate.ts` y `inre/FloatingAiAssistant.tsx`,
- * mejorado para conversaciones largas:
- * - Usa `continuous = true` y `interimResults = true` (el texto provisional
- *   solo se muestra en la píldora flotante, mientras que las frases finalizadas
- *   se insertan limpiamente en el cursor sin parpadeos).
- * - Si Chrome corta la sesión por silencio (`no-speech`) o por límite de ~60s,
- *   se reanuda automáticamente creando una nueva instancia tras un breve respiro.
- * - SOLO se detiene cuando el usuario llama `stop()` o ante un error fatal
- *   de permisos/hardware (`not-allowed`, `audio-capture`, `language-not-supported`).
+ * Emite actualizaciones EN VIVO (`onLive`) palabra por palabra mientras hablas
+ * para escribir directamente en el cursor sin esperar a que termines de hablar,
+ * además de confirmar cada frase al finalizar (`onFinal`).
+ *
+ * Se reanuda automáticamente tras silencios o cortes de Chrome (~60 s) y SOLO
+ * se detiene cuando el usuario llama `stop()` o ante error fatal de permisos.
  */
 
 import { cleanDictatedChunk } from "./polish";
+import type { LiveSpeechPayload } from "./types";
 
 interface SpeechRecognitionAlt {
   readonly transcript: string;
@@ -37,6 +35,7 @@ interface SpeechRecognitionLike {
   start(): void;
   stop(): void;
   abort(): void;
+  onstart: (() => void) | null;
   onresult: ((ev: SpeechRecognitionEventLike) => void) | null;
   onerror: ((ev: { error?: string }) => void) | null;
   onend: (() => void) | null;
@@ -58,15 +57,16 @@ export function isSpeechAvailable(): boolean {
 
 function resolveLang(preferred?: string): string {
   if (preferred && preferred !== "auto") return preferred;
-  const nav = navigator.language || "es-419";
-  return nav;
+  return navigator.language || "es-419";
 }
 
 export interface SpeechEngineOptions {
   language?: string;
   polish?: boolean;
   autoCapitalize?: boolean;
+  onReady?: () => void;
   onInterim?: (text: string) => void;
+  onLive?: (payload: LiveSpeechPayload) => void;
   onFinal?: (text: string) => void;
   onLevel?: (rms: number) => void;
   onError?: (message: string, fatal: boolean) => void;
@@ -76,7 +76,9 @@ export interface SpeechEngineOptions {
 export interface SpeechEngineHandle {
   start(): Promise<void>;
   stop(): void;
-  updateOptions(patch: Partial<Pick<SpeechEngineOptions, "language" | "polish" | "autoCapitalize">>): void;
+  updateOptions(
+    patch: Partial<Pick<SpeechEngineOptions, "language" | "polish" | "autoCapitalize">>,
+  ): void;
   isRunning(): boolean;
 }
 
@@ -91,6 +93,7 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
   let restartTimer: number | null = null;
   let networkRetries = 0;
   let isNewSentence = true;
+  let sessionSeq = 0;
 
   // AudioContext RMS meter
   let micStream: MediaStream | null = null;
@@ -114,11 +117,14 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
         for (let i = 0; i < buf.length; i += 1) {
           sum += buf[i] * buf[i];
         }
-        const rms = Math.sqrt(sum / buf.length);
-        opts.onLevel?.(rms);
+        opts.onLevel?.(Math.sqrt(sum / buf.length));
       }, 65);
     } catch (err) {
+      const name = err instanceof Error ? err.name : "";
       const msg = err instanceof Error ? err.message : String(err);
+      if (name === "NotAllowedError" || name === "PermissionDeniedError" || /denied|permission/i.test(msg)) {
+        throw new Error("MIC_PERMISSION_REQUIRED: Permiso de micrófono necesario para dictar.");
+      }
       throw new Error(`No se pudo abrir el micrófono: ${msg}`);
     }
   }
@@ -154,52 +160,57 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
       return;
     }
 
+    sessionSeq += 1;
+    const seq = sessionSeq;
+    const finalizedSlots = new Set<number>();
+
     const instance = new Rec();
     instance.lang = lang;
     instance.continuous = true;
     instance.interimResults = true;
     instance.maxAlternatives = 1;
 
+    instance.onstart = () => {
+      opts.onReady?.();
+    };
+
     instance.onresult = (event) => {
       networkRetries = 0;
-      let interim = "";
-      let finalRaw = "";
+      let interimAll = "";
 
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        if (finalizedSlots.has(i)) continue;
         const res = event.results[i];
-        const transcript = res?.[0]?.transcript ?? "";
-        if (!transcript) continue;
-        if (res?.isFinal) {
-          finalRaw += (finalRaw ? " " : "") + transcript;
-        } else {
-          interim += (interim ? " " : "") + transcript;
-        }
-      }
+        const raw = res?.[0]?.transcript ?? "";
+        if (!raw.trim()) continue;
 
-      if (interim.trim()) {
-        opts.onInterim?.(interim.trim());
-      } else if (finalRaw.trim()) {
-        opts.onInterim?.("");
-      }
-
-      if (finalRaw.trim()) {
-        const cleaned = cleanDictatedChunk(finalRaw, {
-          polish,
+        const utteranceId = `${seq}-${i}`;
+        const cleaned = cleanDictatedChunk(raw, {
+          polish: res?.isFinal ? polish : false,
           autoCapitalize,
           isNewSentence,
         });
-        if (cleaned) {
+
+        if (!cleaned) continue;
+
+        if (res?.isFinal) {
+          finalizedSlots.add(i);
           isNewSentence = /[.!?…]\s*$/.test(cleaned);
+          opts.onLive?.({ utteranceId, text: cleaned, isFinal: true });
           opts.onFinal?.(cleaned);
+        } else {
+          interimAll += (interimAll ? " " : "") + cleaned;
+          opts.onLive?.({ utteranceId, text: cleaned, isFinal: false });
         }
       }
+
+      opts.onInterim?.(interimAll);
     };
 
     instance.onerror = (ev) => {
       const code = ev.error || "unknown";
 
       if (code === "no-speech" || code === "aborted") {
-        // Silencio o corte interno: `onend` reanudará automáticamente si el usuario no detuvo.
         return;
       }
 
@@ -210,7 +221,7 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
 
       if (code === "not-allowed" || code === "service-not-allowed") {
         finishWithError(
-          "Permiso de micrófono o servicio de voz denegado. Activa el micrófono en RECO.",
+          "MIC_PERMISSION_REQUIRED: Permiso de micrófono o servicio de voz denegado.",
           true,
         );
         return;
@@ -234,7 +245,6 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
         return;
       }
 
-      // Otros errores transitorios: reintentar mientras el usuario no detenga.
       opts.onError?.(`Aviso de dictado (${code}), reanudando…`, false);
     };
 
@@ -248,9 +258,8 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
         return;
       }
 
-      // Conversación larga o pausa: reanudar automáticamente hasta que el usuario lo detenga.
       clearRestartTimer();
-      const delay = networkRetries > 0 ? Math.min(2000, 350 * networkRetries) : 140;
+      const delay = networkRetries > 0 ? Math.min(2000, 350 * networkRetries) : 120;
       restartTimer = window.setTimeout(() => {
         restartTimer = null;
         spawnRecogniser();
@@ -261,13 +270,12 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
     try {
       instance.start();
     } catch {
-      // Si falla por transición rápida, reintentar brevemente
       if (!userStopped && active) {
         clearRestartTimer();
         restartTimer = window.setTimeout(() => {
           restartTimer = null;
           spawnRecogniser();
-        }, 300);
+        }, 250);
       }
     }
   }
@@ -320,7 +328,6 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
 
       if (rec) {
         const target = rec;
-        // `stop()` vacía la última frase en curso como `isFinal` antes de disparar `onend`.
         try {
           target.stop();
         } catch {

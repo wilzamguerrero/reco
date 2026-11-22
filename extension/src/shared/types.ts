@@ -43,6 +43,7 @@ export interface DictationConfig {
   smartSpacing: boolean;
   autoCapitalize: boolean;
   showFloatingOrb: boolean;
+  desktopTyping: boolean;
 }
 
 export interface RecordingConfig {
@@ -58,6 +59,12 @@ export interface RecordingConfig {
 export interface OrbPosition {
   x: number;
   y: number;
+}
+
+export interface DictationNote {
+  id: string;
+  text: string;
+  createdAt: number;
 }
 
 export interface AppConfig {
@@ -100,6 +107,7 @@ export interface LiveState {
   dictationError: string | null;
   dictationLevel: number;
   dictationHostTabId: number | null;
+  nativeHostConnected: boolean;
 
   recordingPhase: RecordingPhase;
   recordingId: string | null;
@@ -116,6 +124,12 @@ export interface LiveState {
   lastNotionUrl: string | null;
 }
 
+export interface LiveSpeechPayload {
+  utteranceId: string;
+  text: string;
+  isFinal: boolean;
+}
+
 /** Mensajes intercambiados entre Service Worker, Offscreen, Bridge, Content y UI. */
 export type ExtMessage =
   | { type: "GET_STATE" }
@@ -126,13 +140,21 @@ export type ExtMessage =
   | { type: "DICTATION_STOP" }
   | { type: "DICTATION_BRIDGE_READY"; tabId?: number }
   | { type: "DICTATION_INTERIM"; text: string }
+  | { type: "DICTATION_LIVE"; payload: LiveSpeechPayload }
   | { type: "DICTATION_FINAL"; text: string }
   | { type: "DICTATION_LEVEL"; rms: number }
   | { type: "DICTATION_ERROR"; message: string; fatal?: boolean }
   | { type: "DICTATION_ENDED"; reason?: string }
+  | { type: "INJECT_LIVE"; payload: LiveSpeechPayload; smartSpacing: boolean }
   | { type: "INJECT_TEXT"; text: string; smartSpacing: boolean }
   | { type: "INJECT_INTERIM"; text: string }
+  | { type: "INJECTION_FEEDBACK"; ok: boolean }
+  | { type: "OVERLAY_FEEDBACK"; ok: boolean }
+  | { type: "PING_OVERLAY" }
+  | { type: "CURSOR_FOCUSED" }
+  | { type: "TEST_NATIVE_HOST" }
   | { type: "RECORDING_START" }
+  | { type: "RECORDING_TOGGLE" }
   | { type: "RECORDING_PAUSE_TOGGLE" }
   | { type: "RECORDING_STOP" }
   | { type: "RECORDING_DISCARD" }

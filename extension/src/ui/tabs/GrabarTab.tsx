@@ -18,12 +18,14 @@ function formatDuration(ms: number): string {
 export function GrabarTab({
   live,
   config,
+  shortcut,
   updateConfig,
   send,
   onGoNotion,
 }: {
   live: LiveState;
   config: AppConfig;
+  shortcut: string;
   updateConfig: (patch: Partial<AppConfig>) => Promise<AppConfig>;
   send: (msg: ExtMessage) => Promise<unknown>;
   onGoNotion: () => void;
@@ -41,31 +43,100 @@ export function GrabarTab({
 
   return (
     <div className="pane pane-scroll">
-      <div className="pane-row">
-        <span className="pane-label">Destino Notion</span>
-        {hasNotionTarget ? (
+      {idle ? (
+        <button
+          type="button"
+          className="action-primary action-red"
+          onClick={() => void send({ type: "RECORDING_START" })}
+        >
+          <Icon name="monitor" size={15} />
+          <span>Grabar</span>
+          <kbd className="kbd">{shortcut || "Sin atajo"}</kbd>
+        </button>
+      ) : uploading ? (
+        <button type="button" className="action-primary" disabled>
+          <span>Subiendo · {live.uploadProgress}%</span>
+        </button>
+      ) : (
+        <div className="action-row">
+          <button
+            type="button"
+            className="action-primary"
+            onClick={() => void send({ type: "RECORDING_PAUSE_TOGGLE" })}
+          >
+            <Icon name={paused ? "play" : "pause"} size={14} />
+            <span>{paused ? "Seguir" : "Pausa"}</span>
+          </button>
+          <button
+            type="button"
+            className="action-primary action-red"
+            onClick={() => void send({ type: "RECORDING_STOP" })}
+          >
+            <Icon name="stop" size={14} />
+            <span>Detener</span>
+          </button>
+        </div>
+      )}
+
+      {(phase === "recording" || paused) && (
+        <div className="pane-row" style={{ borderColor: "var(--accent)" }}>
+          <span style={{ fontFamily: "var(--mono)", fontWeight: 700, fontSize: 11.5, color: paused ? "var(--ochre)" : "var(--accent)" }}>
+            {formatDuration(live.recordingElapsedMs)} · {(live.recordingBytes / (1024 * 1024)).toFixed(1)} MB
+          </span>
           <button
             type="button"
             className="btn-xs"
-            style={{ marginLeft: "auto", color: "#a7f3d0", borderColor: "rgba(52,211,153,0.35)" }}
-            onClick={onGoNotion}
+            style={{ marginLeft: "auto" }}
+            title="Descartar grabación"
+            onClick={() => void send({ type: "RECORDING_DISCARD" })}
           >
-            {config.notion.targetPageTitle || "Proxy envi"}
+            <Icon name="trash" size={12} />
           </button>
-        ) : (
-          <button
-            type="button"
-            className="btn-xs"
-            style={{ marginLeft: "auto", color: "#fcd34d", borderColor: "rgba(245,158,11,0.4)" }}
-            onClick={onGoNotion}
-          >
-            Elegir página →
-          </button>
-        )}
+        </div>
+      )}
+
+      {uploading && (
+        <div className="pane-col" style={{ borderColor: "var(--violet)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, fontFamily: "var(--mono)" }}>
+            <span>{live.uploadStep}</span>
+            <span>{live.uploadProgress}%</span>
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${live.uploadProgress}%` }} />
+          </div>
+        </div>
+      )}
+
+      <div className="icon-tiles icon-tiles-2">
+        <button
+          type="button"
+          role="switch"
+          disabled={!idle}
+          aria-checked={r.includeMic}
+          title="Incluir micrófono"
+          className={`icon-tile is-red ${r.includeMic ? "is-on" : ""}`}
+          onClick={() => void updateConfig({ recording: { ...r, includeMic: !r.includeMic } })}
+        >
+          <Icon name="mic" size={19} />
+          <span>Mic</span>
+        </button>
+
+        <button
+          type="button"
+          role="switch"
+          disabled={!idle}
+          aria-checked={r.systemAudio}
+          title="Audio del sistema"
+          className={`icon-tile is-red ${r.systemAudio ? "is-on" : ""}`}
+          onClick={() => void updateConfig({ recording: { ...r, systemAudio: !r.systemAudio } })}
+        >
+          <Icon name="audio" size={19} />
+          <span>Audio</span>
+        </button>
       </div>
 
       <div className="pane-row">
-        <span className="pane-label">Calidad</span>
+        <span className="pane-label">Res</span>
         <div className="chips">
           {QUALITIES.map((q) => (
             <button
@@ -99,137 +170,52 @@ export function GrabarTab({
       </div>
 
       <div className="pane-row">
-        <span className="pane-label">Micrófono</span>
-        <button
-          type="button"
-          role="switch"
-          disabled={!idle}
-          aria-checked={r.includeMic}
-          className={`switch ${r.includeMic ? "is-on" : ""}`}
-          onClick={() => void updateConfig({ recording: { ...r, includeMic: !r.includeMic } })}
-        >
-          <span />
-        </button>
-      </div>
-
-      <div className="pane-row">
-        <span className="pane-label">Audio del sistema</span>
-        <button
-          type="button"
-          role="switch"
-          disabled={!idle}
-          aria-checked={r.systemAudio}
-          className={`switch ${r.systemAudio ? "is-on" : ""}`}
-          onClick={() => void updateConfig({ recording: { ...r, systemAudio: !r.systemAudio } })}
-        >
-          <span />
-        </button>
-      </div>
-
-      <div className="pane-col">
-        <span className="pane-label">Modo de subida a Notion</span>
-        <div className="chips" style={{ marginLeft: 0 }}>
+        <span className="pane-label">Subida</span>
+        <div className="chips">
           <button
             type="button"
             disabled={!idle}
             className={`chip is-red ${r.uploadStrategy === "immediate_single" ? "is-active" : ""}`}
+            title="Video único rápido (AIMD)"
             onClick={() =>
               void updateConfig({ recording: { ...r, uploadStrategy: "immediate_single" } })
             }
           >
-            Video único rápido (AIMD)
+            AIMD
           </button>
           <button
             type="button"
             disabled={!idle}
             className={`chip is-red ${r.uploadStrategy === "live_chapters" ? "is-active" : ""}`}
+            title="En vivo mientras grabas (Loom)"
             onClick={() =>
               void updateConfig({ recording: { ...r, uploadStrategy: "live_chapters" } })
             }
           >
-            En vivo mientras grabas (Loom)
+            LIVE
           </button>
         </div>
       </div>
 
-      {(phase === "recording" || paused) && (
-        <div className="pane-col" style={{ borderColor: "rgba(255,74,61,0.35)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontWeight: 650, color: paused ? "#fcd34d" : "#ff8a5c" }}>
-              {paused ? "En pausa" : "Grabando pantalla"}
-            </span>
-            <span style={{ fontFamily: "var(--mono)", fontSize: 12 }}>
-              {formatDuration(live.recordingElapsedMs)} ·{" "}
-              {(live.recordingBytes / (1024 * 1024)).toFixed(1)} MB
-            </span>
-          </div>
-          {live.recordingChaptersUploaded > 0 && (
-            <span className="pane-hint" style={{ color: "#34d399" }}>
-              ✓ {live.recordingChaptersUploaded} capítulo(s) ya subidos a Notion mientras grabas
-            </span>
-          )}
-        </div>
-      )}
-
-      {uploading && (
-        <div className="pane-col" style={{ borderColor: "rgba(52,211,153,0.4)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-            <span style={{ color: "#a7f3d0", fontWeight: 600 }}>{live.uploadStep}</span>
-            <span>{live.uploadProgress}%</span>
-          </div>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${live.uploadProgress}%` }} />
-          </div>
-        </div>
-      )}
+      <div className="pane-row">
+        <Icon name="notion" size={14} style={{ color: "var(--fg-muted)" }} />
+        <button
+          type="button"
+          className="btn-xs"
+          style={{
+            marginLeft: "auto",
+            color: hasNotionTarget ? "var(--mint)" : "var(--ochre)",
+            borderColor: hasNotionTarget ? "var(--mint)" : "var(--ochre)",
+          }}
+          onClick={onGoNotion}
+        >
+          {hasNotionTarget
+            ? config.notion.targetPageTitle || "Proxy envi"
+            : "Elegir página →"}
+        </button>
+      </div>
 
       {live.recordingError && <div className="alert-box">{live.recordingError}</div>}
-
-      <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
-        {idle ? (
-          <button
-            type="button"
-            className="action-primary action-red"
-            onClick={() => void send({ type: "RECORDING_START" })}
-          >
-            <Icon name="monitor" size={14} />
-            Empezar a grabar (Alt + Shift + R)
-          </button>
-        ) : uploading ? (
-          <button type="button" className="action-primary" disabled>
-            Subiendo grabación a Notion…
-          </button>
-        ) : (
-          <>
-            <div className="action-row">
-              <button
-                type="button"
-                className="action-primary"
-                onClick={() => void send({ type: "RECORDING_PAUSE_TOGGLE" })}
-              >
-                <Icon name={paused ? "play" : "pause"} size={13} />
-                {paused ? "Reanudar" : "Pausar"}
-              </button>
-              <button
-                type="button"
-                className="action-primary action-red"
-                onClick={() => void send({ type: "RECORDING_STOP" })}
-              >
-                <Icon name="stop" size={13} />
-                Detener y subir
-              </button>
-            </div>
-            <button
-              type="button"
-              className="btn-xs"
-              style={{ alignSelf: "center", color: "var(--fg-muted)" }}
-              onClick={() => void send({ type: "RECORDING_DISCARD" })}
-            >
-              Descartar grabación
-            </button>
-          </>
-        )}
-      </div>
     </div>
   );
 }

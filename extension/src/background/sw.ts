@@ -4,17 +4,18 @@
  * Coordina:
  * - Estado global de Dictado (Cian) y Grabación/Subida a Notion (Rojo / Verde).
  * - Atajos globales (`Alt+Shift+D`, `Alt+Shift+R`, `Alt+Shift+P`).
- * - Menú contextual del navegador ("Dictar aquí", "Grabar pantalla hacia Notion").
- * - Ciclo de vida del `offscreen.html` para grabación y del `bridge.html` para
- *   dictado continuo sin perder el foco en el cursor del usuario.
+ * - Inserción universal en Chrome (`all_frames: true` + Shadow DOM + auto-inyección
+ *   en pestañas ya abiertas) y en apps de escritorio externas vía Native Messaging
+ *   (`com.reco.typer`) cuando Chrome no tiene el foco.
  */
 
-import { getConfig, upsertRecording } from "../shared/storage";
+import { getConfig, upsertDictationNote, upsertRecording } from "../shared/storage";
 import type { ExtMessage, LiveState, RecordingItem } from "../shared/types";
 
 const OFFSCREEN_URL = "offscreen.html";
 const BRIDGE_URL = chrome.runtime.getURL("bridge.html");
 const PERMISSIONS_URL = chrome.runtime.getURL("permissions.html");
+const NATIVE_HOST_NAME = "com.reco.typer";
 
 let state: LiveState = {
   dictationPhase: "idle",
@@ -24,6 +25,7 @@ let state: LiveState = {
   dictationError: null,
   dictationLevel: 0,
   dictationHostTabId: null,
+  nativeHostConnected: false,
 
   recordingPhase: "idle",
   recordingId: null,
@@ -41,33 +43,132 @@ let state: LiveState = {
 };
 
 let bridgeTabId: number | null = null;
+let bridgeReady = false;
+let bridgeWakeTimer: ReturnType<typeof setTimeout> | null = null;
 let lastTargetTabId: number | null = null;
+const lastFocusedFrameByTab = new Map<number, number>();
 let offscreenCreating: Promise<void> | null = null;
+let nativePort: chrome.runtime.Port | null = null;
+let lastCommandAt = 0;
+let lastLiveHandledInPage = false;
+let currentDictationSessionId: string | null = null;
+
+function allowShortcutCommand(): boolean {
+  const now = Date.now();
+  if (now - lastCommandAt < 350) return false;
+  lastCommandAt = now;
+  return true;
+}
+
+function ensureNativePort(): Promise<boolean> {
+  if (nativePort) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    try {
+      const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+      let settled = false;
+
+      port.onMessage.addListener((msg: unknown) => {
+        const data = msg as { ok?: boolean; pong?: boolean } | null;
+        if (data?.pong || data?.ok) {
+          state.nativeHostConnected = true;
+          if (!settled) {
+            settled = true;
+            resolve(true);
+          }
+          void broadcastState();
+        }
+      });
+
+      port.onDisconnect.addListener(() => {
+        nativePort = null;
+        state.nativeHostConnected = false;
+        if (!settled) {
+          settled = true;
+          resolve(false);
+        }
+        void broadcastState();
+      });
+
+      nativePort = port;
+      port.postMessage({ action: "ping" });
+
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(Boolean(nativePort));
+        }
+      }, 2500);
+    } catch {
+      nativePort = null;
+      state.nativeHostConnected = false;
+      resolve(false);
+    }
+  });
+}
+
+async function typeViaNativeHost(text: string): Promise<boolean> {
+  const ready = await ensureNativePort();
+  if (!ready || !nativePort) return false;
+  try {
+    nativePort.postMessage({ action: "type", text: `${text} ` });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+let lastActionIconState: string | null = null;
 
 function updateActionBadge() {
+  let iconKey: "idle" | "dictation" | "recording" | "paused" | "uploading" = "idle";
+
   if (state.recordingPhase === "recording") {
+    iconKey = "recording";
     void chrome.action.setBadgeText({ text: "REC" });
-    void chrome.action.setBadgeBackgroundColor({ color: "#ff4a3d" });
+    void chrome.action.setBadgeBackgroundColor({ color: "#F05A28" });
+    void chrome.action.setBadgeTextColor?.({ color: "#09090B" });
   } else if (state.recordingPhase === "paused") {
-    void chrome.action.setBadgeText({ text: "PAU" });
-    void chrome.action.setBadgeBackgroundColor({ color: "#f59e0b" });
+    iconKey = "paused";
+    void chrome.action.setBadgeText({ text: "II" });
+    void chrome.action.setBadgeBackgroundColor({ color: "#F4B41A" });
+    void chrome.action.setBadgeTextColor?.({ color: "#09090B" });
   } else if (state.recordingPhase === "uploading" || state.uploadActiveId) {
-    void chrome.action.setBadgeText({ text: "UP" });
-    void chrome.action.setBadgeBackgroundColor({ color: "#10b981" });
+    iconKey = "uploading";
+    void chrome.action.setBadgeText({ text: `${state.uploadProgress}%` });
+    void chrome.action.setBadgeBackgroundColor({ color: "#8B6EFF" });
+    void chrome.action.setBadgeTextColor?.({ color: "#09090B" });
   } else if (state.dictationPhase === "listening") {
-    void chrome.action.setBadgeText({ text: "VOZ" });
-    void chrome.action.setBadgeBackgroundColor({ color: "#06b6d4" });
-  } else {
+    iconKey = "dictation";
     void chrome.action.setBadgeText({ text: "" });
+  } else {
+    iconKey = "idle";
+    void chrome.action.setBadgeText({ text: "" });
+  }
+
+  if (iconKey !== lastActionIconState) {
+    lastActionIconState = iconKey;
+    const path =
+      iconKey === "idle"
+        ? { 16: "icons/icon16.png", 32: "icons/icon32.png" }
+        : { 16: `icons/${iconKey}-16.png`, 32: `icons/${iconKey}-32.png` };
+    void chrome.action.setIcon({ path }).catch(() => {});
+  }
+}
+
+function broadcastStateFast() {
+  void chrome.runtime.sendMessage({ type: "STATE_SYNC", state } satisfies ExtMessage).catch(() => {});
+  if (lastTargetTabId !== null) {
+    void chrome.tabs
+      .sendMessage(lastTargetTabId, { type: "STATE_SYNC", state } satisfies ExtMessage, { frameId: 0 })
+      .catch(() => {});
   }
 }
 
 async function broadcastState() {
   updateActionBadge();
-  // Broadcast a páginas internas de la extensión (popup, sidepanel)
   void chrome.runtime.sendMessage({ type: "STATE_SYNC", state } satisfies ExtMessage).catch(() => {});
 
-  // Broadcast a la pestaña activa y a las pestañas visibles
   const tabs = await chrome.tabs.query({}).catch(() => []);
   for (const tab of tabs) {
     if (!tab.id || !tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) {
@@ -75,22 +176,98 @@ async function broadcastState() {
     }
     if (tab.active) {
       void chrome.tabs
-        .sendMessage(tab.id, { type: "STATE_SYNC", state } satisfies ExtMessage)
+        .sendMessage(tab.id, { type: "STATE_SYNC", state } satisfies ExtMessage, { frameId: 0 })
         .catch(() => {});
     }
   }
 }
 
 async function getActiveWebTab(): Promise<chrome.tabs.Tab | null> {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
-  if (tab?.id && tab.url && !tab.url.startsWith("chrome-extension://")) {
-    return tab;
+  const wins = await chrome.windows
+    .getAll({ populate: true, windowTypes: ["normal"] })
+    .catch(() => []);
+  const ordered = [...wins].sort((a, b) => Number(Boolean(b.focused)) - Number(Boolean(a.focused)));
+
+  for (const w of ordered) {
+    const active = w.tabs?.find((t) => t.active);
+    if (
+      active?.id &&
+      active.url &&
+      !active.url.startsWith("chrome-extension://") &&
+      !active.url.startsWith("chrome://")
+    ) {
+      return active;
+    }
   }
+
   if (lastTargetTabId !== null) {
     const fallback = await chrome.tabs.get(lastTargetTabId).catch(() => null);
-    if (fallback?.id) return fallback;
+    if (
+      fallback?.id &&
+      fallback.url &&
+      !fallback.url.startsWith("chrome-extension://") &&
+      !fallback.url.startsWith("chrome://")
+    ) {
+      return fallback;
+    }
   }
   return null;
+}
+
+async function ensureContentInjected(tabId: number): Promise<void> {
+  try {
+    const ping = (await chrome.tabs
+      .sendMessage(tabId, { type: "PING_OVERLAY" } satisfies ExtMessage, { frameId: 0 })
+      .catch(() => null)) as { ok?: boolean } | null;
+
+    if (!ping?.ok) {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        files: ["overlay.js"],
+      });
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["injector.js"],
+    });
+  } catch {
+    // chrome:// u origen restringido
+  }
+}
+
+async function injectIntoActiveTab(
+  tabId: number,
+  msg: ExtMessage,
+): Promise<boolean> {
+  const frameId = lastFocusedFrameByTab.get(tabId);
+
+  const trySend = async (targetFrameId?: number): Promise<boolean> => {
+    try {
+      const res = (
+        targetFrameId !== undefined
+          ? await chrome.tabs.sendMessage(tabId, msg, { frameId: targetFrameId })
+          : await chrome.tabs.sendMessage(tabId, msg)
+      ) as { ok?: boolean; skipped?: boolean } | undefined;
+      return Boolean(res?.ok);
+    } catch {
+      return false;
+    }
+  };
+
+  if (frameId !== undefined && (await trySend(frameId))) {
+    return true;
+  }
+  if (await trySend(undefined)) {
+    return true;
+  }
+
+  // Si la pestaña ya estaba abierta antes de cargar la extensión, inyectamos y reintentamos
+  await ensureContentInjected(tabId);
+  if (frameId !== undefined && (await trySend(frameId))) {
+    return true;
+  }
+  return await trySend(undefined);
 }
 
 async function ensureOffscreenDocument() {
@@ -139,26 +316,38 @@ async function startDictation(explicitTabId?: number) {
     : await getActiveWebTab();
   if (activeTab?.id) {
     lastTargetTabId = activeTab.id;
+    // Asegurar content script en pestañas abiertas antes de instalar la extensión
+    void ensureContentInjected(activeTab.id);
   }
+
+  // Intentar conectar host nativo en silencio por si el usuario dicta fuera de Chrome
+  const cfg = await getConfig();
+  if (cfg.dictation.desktopTyping) {
+    void ensureNativePort();
+  }
+
+  const startedAt = Date.now();
+  currentDictationSessionId = `dic-${startedAt}`;
 
   state = {
     ...state,
     dictationPhase: "listening",
-    dictationStartedAt: Date.now(),
+    dictationStartedAt: startedAt,
     dictationInterim: "",
+    dictationTranscript: "",
     dictationError: null,
     dictationLevel: 0,
   };
   await broadcastState();
 
-  // Cerrar bridge previo si quedó colgado
   if (bridgeTabId !== null) {
     await chrome.tabs.remove(bridgeTabId).catch(() => {});
     bridgeTabId = null;
   }
 
-  // Abrimos `bridge.html` como pestaña fijada en segundo plano (`active: false`)
-  // para que el cursor del usuario en su editor NO pierda el foco.
+  bridgeReady = false;
+  if (bridgeWakeTimer) clearTimeout(bridgeWakeTimer);
+
   const tab = await chrome.tabs.create({
     url: BRIDGE_URL,
     pinned: true,
@@ -166,6 +355,21 @@ async function startDictation(explicitTabId?: number) {
   });
   bridgeTabId = tab.id ?? null;
   state.dictationHostTabId = bridgeTabId;
+
+  // Si Chrome suspende la pestaña en segundo plano antes de arrancar SpeechRecognition,
+  // la despertamos 120 ms y devolvemos el foco al instante a la pestaña del usuario.
+  const createdId = bridgeTabId;
+  bridgeWakeTimer = setTimeout(() => {
+    if (bridgeReady || !createdId || bridgeTabId !== createdId) return;
+    const returnTo = lastTargetTabId;
+    void chrome.tabs.update(createdId, { active: true }).then(() => {
+      if (returnTo !== null) {
+        setTimeout(() => {
+          void chrome.tabs.update(returnTo, { active: true }).catch(() => {});
+        }, 120);
+      }
+    }).catch(() => {});
+  }, 1500);
 }
 
 async function stopDictation() {
@@ -198,8 +402,6 @@ async function startRecording() {
   const config = await getConfig();
   const targetTab = await getActiveWebTab();
 
-  // `desktopCapture.chooseDesktopMedia` necesita una pestaña válida; si el usuario
-  // está en chrome://, abrimos una ventana/pestaña de contexto o pasamos la actual.
   const sources: Parameters<typeof chrome.desktopCapture.chooseDesktopMedia>[0] = [
     "screen",
     "window",
@@ -319,6 +521,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 chrome.commands.onCommand.addListener((command) => {
+  if (!allowShortcutCommand()) return;
   if (command === "toggle-dictation") {
     if (state.dictationPhase === "listening") void stopDictation();
     else void startDictation();
@@ -336,17 +539,37 @@ chrome.commands.onCommand.addListener((command) => {
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  void chrome.tabs.get(tabId).then((tab) => {
-    if (tab.url && !tab.url.startsWith("chrome-extension://") && !tab.url.startsWith("chrome://")) {
-      lastTargetTabId = tabId;
+  void chrome.tabs.get(tabId).then(async (tab) => {
+    if (!tab.url || tab.url.startsWith("chrome-extension://") || tab.url.startsWith("chrome://")) {
+      return;
+    }
+    lastTargetTabId = tabId;
+    if (state.dictationPhase === "listening" || state.recordingPhase !== "idle") {
+      await ensureContentInjected(tabId);
     }
     void chrome.tabs
-      .sendMessage(tabId, { type: "STATE_SYNC", state } satisfies ExtMessage)
+      .sendMessage(tabId, { type: "STATE_SYNC", state } satisfies ExtMessage, { frameId: 0 })
       .catch(() => {});
   });
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete" || !tab.active) return;
+  if (!tab.url || tab.url.startsWith("chrome-extension://") || tab.url.startsWith("chrome://")) {
+    return;
+  }
+  lastTargetTabId = tabId;
+  if (state.dictationPhase === "listening" || state.recordingPhase !== "idle") {
+    void ensureContentInjected(tabId).then(() => {
+      void chrome.tabs
+        .sendMessage(tabId, { type: "STATE_SYNC", state } satisfies ExtMessage, { frameId: 0 })
+        .catch(() => {});
+    });
+  }
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
+  lastFocusedFrameByTab.delete(tabId);
   if (tabId === bridgeTabId) {
     bridgeTabId = null;
     if (state.dictationPhase === "listening") {
@@ -369,7 +592,36 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     return;
   }
 
+  if (msg.type === "CURSOR_FOCUSED") {
+    if (sender.tab?.id !== undefined && sender.frameId !== undefined) {
+      lastTargetTabId = sender.tab.id;
+      lastFocusedFrameByTab.set(sender.tab.id, sender.frameId);
+    }
+    return;
+  }
+
+  if (msg.type === "INJECTION_FEEDBACK") {
+    if (sender.tab?.id !== undefined) {
+      void chrome.tabs
+        .sendMessage(
+          sender.tab.id,
+          { type: "OVERLAY_FEEDBACK", ok: msg.ok } satisfies ExtMessage,
+          { frameId: 0 },
+        )
+        .catch(() => {});
+    }
+    return;
+  }
+
+  if (msg.type === "TEST_NATIVE_HOST") {
+    void ensureNativePort().then((ok) => {
+      sendResponse({ connected: ok });
+    });
+    return true;
+  }
+
   if (msg.type === "DICTATION_TOGGLE") {
+    if (sender.tab?.id && !allowShortcutCommand()) return;
     if (state.dictationPhase === "listening") void stopDictation();
     else void startDictation(msg.targetTabId ?? sender.tab?.id);
     return;
@@ -385,15 +637,49 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     return;
   }
 
+  if (msg.type === "DICTATION_BRIDGE_READY") {
+    bridgeReady = true;
+    if (bridgeWakeTimer) {
+      clearTimeout(bridgeWakeTimer);
+      bridgeWakeTimer = null;
+    }
+    return;
+  }
+
   if (msg.type === "DICTATION_LEVEL") {
     state.dictationLevel = msg.rms;
-    void broadcastState();
+    broadcastStateFast();
     return;
   }
 
   if (msg.type === "DICTATION_INTERIM") {
     state.dictationInterim = msg.text;
-    void broadcastState();
+    broadcastStateFast();
+    return;
+  }
+
+  if (msg.type === "DICTATION_LIVE") {
+    void (async () => {
+      const cfg = await getConfig();
+      const lastWin = await chrome.windows.getLastFocused().catch(() => null);
+      const chromeFocused = Boolean(lastWin?.focused);
+      if (!chromeFocused) {
+        lastLiveHandledInPage = false;
+        return;
+      }
+
+      const tab = await getActiveWebTab();
+      if (tab?.id) {
+        const ok = await injectIntoActiveTab(tab.id, {
+          type: "INJECT_LIVE",
+          payload: msg.payload,
+          smartSpacing: cfg.dictation.smartSpacing,
+        });
+        lastLiveHandledInPage = ok;
+      } else {
+        lastLiveHandledInPage = false;
+      }
+    })();
     return;
   }
 
@@ -403,18 +689,42 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
       ? `${state.dictationTranscript} ${msg.text}`
       : msg.text;
 
+    const sessionId = currentDictationSessionId ?? `dic-${Date.now()}`;
+    currentDictationSessionId = sessionId;
+    void upsertDictationNote({
+      id: sessionId,
+      text: state.dictationTranscript,
+      createdAt: state.dictationStartedAt ?? Date.now(),
+    });
+
     void (async () => {
       const cfg = await getConfig();
-      const tab = await getActiveWebTab();
-      if (tab?.id) {
-        await chrome.tabs
-          .sendMessage(tab.id, {
-            type: "INJECT_TEXT",
-            text: msg.text,
-            smartSpacing: cfg.dictation.smartSpacing,
-          } satisfies ExtMessage)
-          .catch(() => {});
+      const lastWin = await chrome.windows.getLastFocused().catch(() => null);
+      const chromeFocused = Boolean(lastWin?.focused);
+
+      // Si Chrome NO tiene foco (Word, Notepad, VS Code) o si el cursor está en la
+      // barra de direcciones / pestaña chrome:// (donde la página no tiene foco DOM),
+      // usamos el host nativo para escribir directamente donde esté el cursor.
+      const needsSystemTyper = !chromeFocused || !lastLiveHandledInPage;
+      lastLiveHandledInPage = false;
+
+      if (needsSystemTyper && cfg.dictation.desktopTyping) {
+        const typed = await typeViaNativeHost(msg.text);
+        if (!typed && lastTargetTabId !== null) {
+          void chrome.tabs
+            .sendMessage(
+              lastTargetTabId,
+              {
+                type: "DICTATION_ERROR",
+                message:
+                  "Para escribir en la barra de direcciones o apps de escritorio, ejecuta native-host/Instalar_Dictado_Escritorio.bat",
+              } satisfies ExtMessage,
+              { frameId: 0 },
+            )
+            .catch(() => {});
+        }
       }
+
       await broadcastState();
     })();
     return;
@@ -424,7 +734,14 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     state.dictationError = msg.message;
     if (msg.fatal) {
       const lower = msg.message.toLowerCase();
-      if (lower.includes("permiso") || lower.includes("denegado") || lower.includes("notallowed")) {
+      if (
+        lower.includes("mic_permission_required") ||
+        lower.includes("permission") ||
+        lower.includes("permiso") ||
+        lower.includes("denegado") ||
+        lower.includes("denied") ||
+        lower.includes("notallowed")
+      ) {
         void openPermissionsTab("dictation");
       }
       void stopDictation();
@@ -443,6 +760,16 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
 
   if (msg.type === "RECORDING_START") {
     void startRecording();
+    return;
+  }
+
+  if (msg.type === "RECORDING_TOGGLE") {
+    if (sender.tab?.id && !allowShortcutCommand()) return;
+    if (state.recordingPhase === "recording" || state.recordingPhase === "paused") {
+      void stopRecording();
+    } else {
+      void startRecording();
+    }
     return;
   }
 

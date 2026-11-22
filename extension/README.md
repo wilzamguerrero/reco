@@ -39,4 +39,6 @@ npm run build
    - Para probar **OAuth**, copia el `Redirect URI` (`https://<tu-id>.chromiumapp.org/notion`) que aparece en la pestaña Notion y pégalo en tu integración pública en `https://www.notion.so/my-integrations`.
    - Inicia sesión con Notion, selecciona las páginas y elige tu página destino.
 5. Para probar **Dictado**, haz clic en cualquier campo de texto y pulsa `Alt + Shift + D` (o clic en la esfera flotante -> **Dictar aquí**).
+   - Funciona automáticamente en páginas web, `<iframe>` (Google Docs, etc.) y Shadow DOM.
+   - **Opcional para escribir fuera de Chrome** (Word, Bloc de Notas, VS Code, WhatsApp Desktop, etc.): ejecuta `native-host/Instalar_Dictado_Escritorio.bat` e introduce el ID de la extensión que aparece en `chrome://extensions` (o en la pestaña **Dictado**).
 6. Para probar **Grabación**, pulsa `Alt + Shift + R` (o clic en la esfera -> **Grabar pantalla**).

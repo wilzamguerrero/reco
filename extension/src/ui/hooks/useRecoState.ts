@@ -1,6 +1,32 @@
 import { useCallback, useEffect, useState } from "react";
-import { DEFAULT_CONFIG, getConfig, getRecordings, patchConfig } from "../../shared/storage";
-import type { AppConfig, ExtMessage, LiveState, RecordingItem } from "../../shared/types";
+import {
+  clearDictationHistory,
+  DEFAULT_CONFIG,
+  getConfig,
+  getDictationHistory,
+  getRecordings,
+  patchConfig,
+  removeDictationNote,
+} from "../../shared/storage";
+import type {
+  AppConfig,
+  DictationNote,
+  ExtMessage,
+  LiveState,
+  RecordingItem,
+} from "../../shared/types";
+
+export interface ShortcutMap {
+  dictate: string;
+  record: string;
+  pause: string;
+}
+
+const INITIAL_SHORTCUTS: ShortcutMap = {
+  dictate: "Alt+Shift+D",
+  record: "Alt+Shift+R",
+  pause: "Alt+Shift+P",
+};
 
 const INITIAL_LIVE: LiveState = {
   dictationPhase: "idle",
@@ -10,6 +36,7 @@ const INITIAL_LIVE: LiveState = {
   dictationError: null,
   dictationLevel: 0,
   dictationHostTabId: null,
+  nativeHostConnected: false,
   recordingPhase: "idle",
   recordingId: null,
   recordingStartedAt: null,
@@ -24,14 +51,33 @@ const INITIAL_LIVE: LiveState = {
   lastNotionUrl: null,
 };
 
+async function readChromeShortcuts(): Promise<ShortcutMap> {
+  try {
+    const cmds = await chrome.commands.getAll();
+    const find = (name: string) => cmds.find((c) => c.name === name)?.shortcut ?? "";
+    return {
+      dictate: find("toggle-dictation"),
+      record: find("toggle-recording"),
+      pause: find("pause-recording"),
+    };
+  } catch {
+    return INITIAL_SHORTCUTS;
+  }
+}
+
 export function useRecoState() {
   const [live, setLive] = useState<LiveState>(INITIAL_LIVE);
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
   const [recordings, setRecordings] = useState<RecordingItem[]>([]);
+  const [dictationHistory, setDictationHistory] = useState<DictationNote[]>([]);
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(INITIAL_SHORTCUTS);
 
   useEffect(() => {
     void getConfig().then(setConfig);
     void getRecordings().then(setRecordings);
+    void getDictationHistory().then(setDictationHistory);
+    void readChromeShortcuts().then(setShortcuts);
+
     void chrome.runtime
       .sendMessage({ type: "GET_STATE" } satisfies ExtMessage)
       .then((res) => {
@@ -52,13 +98,22 @@ export function useRecoState() {
       if (changes.reco_ext_recordings_v1) {
         void getRecordings().then(setRecordings);
       }
+      if (changes.reco_ext_dictation_history_v1) {
+        void getDictationHistory().then(setDictationHistory);
+      }
+    };
+
+    const onFocus = () => {
+      void readChromeShortcuts().then(setShortcuts);
     };
 
     chrome.runtime.onMessage.addListener(onMsg);
     chrome.storage.onChanged.addListener(onStorage);
+    window.addEventListener("focus", onFocus);
     return () => {
       chrome.runtime.onMessage.removeListener(onMsg);
       chrome.storage.onChanged.removeListener(onStorage);
+      window.removeEventListener("focus", onFocus);
     };
   }, []);
 
@@ -67,6 +122,16 @@ export function useRecoState() {
     setConfig(next);
     void chrome.runtime.sendMessage({ type: "CONFIG_UPDATED", config: next } satisfies ExtMessage);
     return next;
+  }, []);
+
+  const deleteDictationNote = useCallback(async (id: string) => {
+    const next = await removeDictationNote(id);
+    setDictationHistory(next);
+  }, []);
+
+  const clearHistory = useCallback(async () => {
+    await clearDictationHistory();
+    setDictationHistory([]);
   }, []);
 
   const send = useCallback((msg: ExtMessage) => {
@@ -78,6 +143,10 @@ export function useRecoState() {
     config,
     recordings,
     setRecordings,
+    dictationHistory,
+    deleteDictationNote,
+    clearHistory,
+    shortcuts,
     updateConfig,
     send,
   };
