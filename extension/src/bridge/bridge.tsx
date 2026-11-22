@@ -12,6 +12,7 @@ import { createRoot } from "react-dom/client";
 import { createSpeechEngine, type SpeechEngineHandle } from "../shared/speechEngine";
 import { getConfig } from "../shared/storage";
 import type { ExtMessage } from "../shared/types";
+import { createWhisperEngine } from "../shared/whisperEngine";
 import { Orb } from "../ui/components/Orb";
 import "../ui/styles/global.css";
 
@@ -28,32 +29,36 @@ function BridgeApp() {
       const cfg = await getConfig();
       if (disposed) return;
 
-      engine = createSpeechEngine({
+      const engineCallbacks = {
         language: cfg.dictation.language,
         polish: cfg.dictation.polish,
         autoCapitalize: cfg.dictation.autoCapitalize,
         onReady() {
-          setStatus("Escuchando · Coloca el cursor donde quieras escribir");
+          setStatus(
+            cfg.dictation.engine === "chrome"
+              ? "Escuchando (Chrome) · Coloca el cursor donde quieras escribir"
+              : "Escuchando (Whisper local) · Habla y haz micro-pausas",
+          );
           void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
         },
-        onLevel(level) {
+        onLevel(level: number) {
           setRms(level);
           void chrome.runtime.sendMessage({ type: "DICTATION_LEVEL", rms: level } satisfies ExtMessage);
         },
-        onInterim(text) {
+        onInterim(text: string) {
           void chrome.runtime.sendMessage({ type: "DICTATION_INTERIM", text } satisfies ExtMessage);
         },
-        onLive(payload) {
+        onLive(payload: Parameters<NonNullable<Parameters<typeof createSpeechEngine>[0]["onLive"]>>[0]) {
           void chrome.runtime.sendMessage({
             type: "DICTATION_LIVE",
             payload,
           } satisfies ExtMessage);
         },
-        onFinal(text) {
+        onFinal(text: string) {
           setLastLine(text);
           void chrome.runtime.sendMessage({ type: "DICTATION_FINAL", text } satisfies ExtMessage);
         },
-        onError(message, fatal) {
+        onError(message: string, fatal: boolean) {
           setStatus(message);
           void chrome.runtime.sendMessage({
             type: "DICTATION_ERROR",
@@ -64,7 +69,18 @@ function BridgeApp() {
         onStop() {
           void chrome.runtime.sendMessage({ type: "DICTATION_ENDED" } satisfies ExtMessage);
         },
-      });
+      };
+
+      engine =
+        cfg.dictation.engine === "chrome"
+          ? createSpeechEngine(engineCallbacks)
+          : createWhisperEngine({
+              ...engineCallbacks,
+              model: cfg.dictation.engine,
+              onStatus(s) {
+                setStatus(s);
+              },
+            });
 
       try {
         await engine.start();

@@ -1,7 +1,19 @@
 import { useState } from "react";
 import { downloadWindowsNativeActivator } from "../../shared/nativeInstaller";
-import type { AppConfig, DictationNote, ExtMessage, LiveState } from "../../shared/types";
+import type {
+  AppConfig,
+  DictationNote,
+  ExtMessage,
+  LiveState,
+  SpeechEngineType,
+} from "../../shared/types";
 import { Icon } from "../components/Icon";
+
+const ENGINES: { id: SpeechEngineType; label: string; tip: string }[] = [
+  { id: "chrome", label: "CHROME", tip: "Web Speech en tiempo real (0 MB, requiere internet)" },
+  { id: "whisper_tiny", label: "WHISPER S", tip: "Whisper Tiny local (open-source, ~40 MB, offline)" },
+  { id: "whisper_base", label: "WHISPER M", tip: "Whisper Base local (open-source, ~75 MB, más preciso)" },
+];
 
 const LANGS = [
   { id: "es-419", label: "ES" },
@@ -191,6 +203,24 @@ export function DictadoTab({
           </button>
         </div>
       )}
+
+      <div className="pane-row">
+        <span className="pane-label">Motor</span>
+        <div className="chips">
+          {ENGINES.map((eng) => (
+            <button
+              key={eng.id}
+              type="button"
+              disabled={listening}
+              title={eng.tip}
+              className={`chip is-cyan ${d.engine === eng.id ? "is-active" : ""}`}
+              onClick={() => void updateConfig({ dictation: { ...d, engine: eng.id } })}
+            >
+              {eng.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="pane-row">
         <Icon name="globe" size={14} style={{ color: "var(--fg-muted)", flexShrink: 0 }} />

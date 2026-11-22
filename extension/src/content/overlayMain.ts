@@ -13,9 +13,10 @@
 import { mountOrb, type OrbHandle, type OrbVisualState } from "../shared/orbRenderer";
 import { getConfig, patchConfig } from "../shared/storage";
 import type { AppConfig, ExtMessage, LiveState } from "../shared/types";
+import { createDrawOverlay } from "./drawOverlay";
 
 const HOST_ID = "reco-ext-host";
-const GUARD_KEY = "__recoOverlayLoaded_v5";
+const GUARD_KEY = "__recoOverlayLoaded_v7";
 const CONTROL_SIZE = 42;
 const TILE_GAP = 8;
 const TILE_STEP = CONTROL_SIZE + TILE_GAP;
@@ -45,6 +46,10 @@ const SVG_PANEL = `<svg width="19" height="19" viewBox="0 0 24 24" fill="current
   <circle cx="17" cy="7" r="4"/>
   <polygon points="7,13 11,21 3,21"/>
   <path d="M13 17a4 4 0 0 1 8 0v4h-8v-4Z"/>
+</svg>`;
+
+const SVG_DRAW = `<svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+  <path d="M3 17.5V21h3.5L18.4 9.1l-3.5-3.5L3 17.5ZM21 6.5 17.5 3l-1.8 1.8 3.5 3.5L21 6.5Z"/>
 </svg>`;
 
 const SVG_PAUSE = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="4" width="5" height="16"/><rect x="14" y="4" width="5" height="16"/></svg>`;
@@ -83,6 +88,7 @@ function runOverlay() {
   let currentState: LiveState | null = null;
   let currentConfig: AppConfig | null = null;
   let menuOpen = false;
+  let isDrawingOpen = false;
   let toastText = "";
   let toastTimer: number | null = null;
   let insertFlashTimer: number | null = null;
@@ -164,7 +170,7 @@ function runOverlay() {
   function deriveOrbVisual(state: LiveState | null): OrbVisualState {
     if (isFlashingInsert) return "inserting";
     if (isErrorFlash) return "error";
-    if (!state) return isStartingDictation ? "starting" : menuOpen ? "menu" : "idle";
+    if (!state) return isStartingDictation ? "starting" : isDrawingOpen ? "drawing" : menuOpen ? "menu" : "idle";
     if (state.recordingPhase === "recording") return "recording";
     if (state.recordingPhase === "paused") return "paused";
     if (state.recordingPhase === "uploading" || state.uploadActiveId) return "uploading";
@@ -176,6 +182,7 @@ function runOverlay() {
       return "dictation";
     }
     if (isStartingDictation) return "starting";
+    if (isDrawingOpen) return "drawing";
     if (menuOpen) return "menu";
     return "idle";
   }
@@ -201,7 +208,7 @@ function runOverlay() {
     const spaceLeft = rect.left;
     const spaceRight = window.innerWidth - rect.right;
 
-    const needed = TILE_STEP * 3 + EDGE_MARGIN;
+    const needed = TILE_STEP * 4 + EDGE_MARGIN;
     type Dir = "up" | "down" | "left" | "right";
     let dir: Dir = "up";
 
@@ -372,8 +379,9 @@ function runOverlay() {
         transform: translate(var(--tx, 0px), var(--ty, 0px)) scale(1) rotate(0deg);
       }
       .fab-group.is-open .fab-tile:nth-child(1) { transition-delay: 0ms; }
-      .fab-group.is-open .fab-tile:nth-child(2) { transition-delay: 42ms; }
-      .fab-group.is-open .fab-tile:nth-child(3) { transition-delay: 84ms; }
+      .fab-group.is-open .fab-tile:nth-child(2) { transition-delay: 38ms; }
+      .fab-group.is-open .fab-tile:nth-child(3) { transition-delay: 76ms; }
+      .fab-group.is-open .fab-tile:nth-child(4) { transition-delay: 114ms; }
 
       .fab-tile:hover {
         transform: translate(calc(var(--tx, 0px) - 1px), calc(var(--ty, 0px) - 1px)) scale(1.06) rotate(0deg);
@@ -387,6 +395,7 @@ function runOverlay() {
 
       .fab-dictate { background: #2ee6c5; }
       .fab-record { background: #f05a28; }
+      .fab-draw { background: #f4b41a; }
       .fab-panel { background: #eae5d9; }
 
       /* Micro brutalist tooltip tag on hover, smartly placed away from edges */
@@ -563,6 +572,23 @@ function runOverlay() {
       void chrome.runtime.sendMessage({ type: "RECORDING_START" } satisfies ExtMessage);
     });
 
+    const drawOverlay = createDrawOverlay((open) => {
+      isDrawingOpen = open;
+      renderState();
+    });
+
+    const btnDraw = document.createElement("button");
+    btnDraw.type = "button";
+    btnDraw.className = "fab-tile fab-draw";
+    btnDraw.title = "Dibujar sobre la página (pizarra invisible)";
+    btnDraw.innerHTML = `${SVG_DRAW}<span class="fab-tip">Dibujar</span>`;
+    btnDraw.addEventListener("mousedown", (e) => e.preventDefault());
+    btnDraw.addEventListener("click", () => {
+      menuOpen = false;
+      renderState();
+      drawOverlay.toggle();
+    });
+
     const btnPanel = document.createElement("button");
     btnPanel.type = "button";
     btnPanel.className = "fab-tile fab-panel";
@@ -574,8 +600,8 @@ function runOverlay() {
       void chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" } satisfies ExtMessage);
     });
 
-    fabButtons = [btnDictate, btnRecord, btnPanel];
-    fabGroupEl.append(btnDictate, btnRecord, btnPanel);
+    fabButtons = [btnDictate, btnRecord, btnDraw, btnPanel];
+    fabGroupEl.append(btnDictate, btnRecord, btnDraw, btnPanel);
 
     toastEl = document.createElement("div");
     toastEl.className = "toast";
@@ -680,6 +706,10 @@ function runOverlay() {
         void chrome.runtime.sendMessage({ type: "RECORDING_STOP" } satisfies ExtMessage);
         return;
       }
+      if (isDrawingOpen) {
+        drawOverlay.close();
+        return;
+      }
       menuOpen = !menuOpen;
       updateSmartLayout();
       renderState();
@@ -756,7 +786,7 @@ function runOverlay() {
     }
 
     const idle = isIdleState(currentState);
-    orbBtn?.classList.toggle("is-idle", idle && !menuOpen);
+    orbBtn?.classList.toggle("is-idle", idle && !menuOpen && !isDrawingOpen);
     if (orbBtn) {
       orbBtn.title =
         visual === "starting"
@@ -765,7 +795,9 @@ function runOverlay() {
             ? "RECO · Transcribiendo tu voz (clic para detener)"
             : visual === "dictation"
               ? "RECO · Escuchando, habla ahora (clic para detener)"
-              : visual === "inserting"
+              : visual === "drawing"
+                ? "RECO · Dibujo activo (clic para salir)"
+                : visual === "inserting"
                 ? "RECO · Texto insertado"
                 : visual === "error"
                   ? "RECO · Revisa el micrófono o portapapeles"

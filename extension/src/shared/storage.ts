@@ -6,6 +6,7 @@ const DICTATION_HISTORY_KEY = "reco_ext_dictation_history_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
   dictation: {
+    engine: "chrome",
     language: "es-419",
     polish: true,
     smartSpacing: true,

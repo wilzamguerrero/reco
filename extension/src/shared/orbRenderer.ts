@@ -16,6 +16,7 @@
 export type OrbVisualState =
   | "idle"
   | "menu"
+  | "drawing"
   | "starting"
   | "dictation"
   | "speaking"
@@ -52,6 +53,12 @@ const PALETTES: Record<OrbVisualState, FlatPalette> = {
     fg: [9, 9, 11], // #09090B ink
     border: [9, 9, 11],
     accent: [46, 230, 197], // #2EE6C5 mint iris
+  },
+  drawing: {
+    bg: [244, 180, 26], // #F4B41A bauhaus ochre (active drawing canvas)
+    fg: [9, 9, 11], // #09090B ink
+    border: [9, 9, 11],
+    accent: [245, 241, 232],
   },
   starting: {
     bg: [9, 9, 11], // #09090B obsidian booting mic
@@ -347,6 +354,54 @@ export function mountOrb(
     ctx!.lineWidth = Math.max(1.8, R * 0.13);
     ctx!.stroke();
 
+    ctx!.restore();
+  }
+
+  /**
+   * DRAWING: Bauhaus geometric pen nib sketching a crisp animated ink wave.
+   */
+  function drawDrawingGlyph(R: number, time: number, fg: string) {
+    const glide = Math.sin(time * 3.2) * (R * 0.14);
+    const bob = Math.cos(time * 6.4) * (R * 0.05);
+
+    ctx!.save();
+    ctx!.translate(C, C);
+
+    // Animated flat baseline ink wave at the bottom
+    ctx!.strokeStyle = fg;
+    ctx!.lineWidth = Math.max(1.8, R * 0.12);
+    ctx!.lineCap = "round";
+    ctx!.beginPath();
+    const waveY = R * 0.56;
+    const waveW = R * 0.64;
+    for (let i = 0; i <= 16; i += 1) {
+      const u = i / 16;
+      const wx = -waveW + u * waveW * 2;
+      const wy = waveY + Math.sin(u * Math.PI * 2.5 - time * 4.2) * (R * 0.09);
+      if (i === 0) ctx!.moveTo(wx, wy);
+      else ctx!.lineTo(wx, wy);
+    }
+    ctx!.stroke();
+
+    // Tilted bold geometric Bauhaus pen body + triangular nib
+    ctx!.save();
+    ctx!.translate(glide, -R * 0.08 + bob);
+    ctx!.rotate(-Math.PI / 4);
+
+    const penW = R * 0.34;
+    const penH = R * 0.66;
+    ctx!.fillStyle = fg;
+    // Barrel
+    ctx!.fillRect(-penW / 2, -penH * 0.62, penW, penH * 0.72);
+    // Sharp triangular nib tip pointing to the wave
+    ctx!.beginPath();
+    ctx!.moveTo(-penW / 2, penH * 0.14);
+    ctx!.lineTo(penW / 2, penH * 0.14);
+    ctx!.lineTo(0, penH * 0.58);
+    ctx!.closePath();
+    ctx!.fill();
+
+    ctx!.restore();
     ctx!.restore();
   }
 
@@ -713,6 +768,9 @@ export function mountOrb(
     switch (currentState) {
       case "menu":
         drawMenuGlyph(innerR, t, stateBlend, fgStr, accentStr);
+        break;
+      case "drawing":
+        drawDrawingGlyph(innerR, t, fgStr);
         break;
       case "starting":
         drawStartingGlyph(innerR, t, fgStr, accentStr);

@@ -1,5 +1,7 @@
 export type DictationPhase = "idle" | "listening" | "inserting" | "error";
 
+export type SpeechEngineType = "chrome" | "whisper_tiny" | "whisper_base";
+
 export type RecordingPhase = "idle" | "recording" | "paused" | "uploading";
 
 export type VideoQuality = "low" | "medium" | "high";
@@ -38,6 +40,7 @@ export interface NotionConfig {
 }
 
 export interface DictationConfig {
+  engine: SpeechEngineType;
   language: string;
   polish: boolean;
   smartSpacing: boolean;
