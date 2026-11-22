@@ -1,6 +1,6 @@
 import { build as viteBuild } from "vite";
 import * as esbuild from "esbuild";
-import { mkdirSync, copyFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, copyFileSync, rmSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { deflateSync } from "node:zlib";
 
@@ -258,7 +258,19 @@ async function run() {
     }),
   ]);
 
-  // 3. Copy manifest & generate flat Bauhaus PNG icons (default + per-function dynamic states)
+  // 3. Copy local ONNX Runtime Web WASM/MJS files (required by Chrome MV3 CSP — no remote CDN scripts)
+  const ortSrc = resolve(root, "node_modules/onnxruntime-web/dist");
+  const ortDst = resolve(dist, "ort");
+  if (existsSync(ortSrc)) {
+    mkdirSync(ortDst, { recursive: true });
+    for (const file of readdirSync(ortSrc)) {
+      if (file.startsWith("ort-wasm-simd-threaded") && (file.endsWith(".mjs") || file.endsWith(".wasm"))) {
+        copyFileSync(resolve(ortSrc, file), resolve(ortDst, file));
+      }
+    }
+  }
+
+  // 4. Copy manifest & generate flat Bauhaus PNG icons (default + per-function dynamic states)
   copyFileSync(resolve(root, "public/manifest.json"), resolve(dist, "manifest.json"));
 
   for (const s of [16, 32, 48, 128]) {

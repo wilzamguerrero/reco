@@ -37,7 +37,9 @@ function BridgeApp() {
           setStatus(
             cfg.dictation.engine === "chrome"
               ? "Escuchando (Chrome) · Coloca el cursor donde quieras escribir"
-              : "Escuchando (Whisper local) · Habla y haz micro-pausas",
+              : cfg.dictation.engine === "moonshine_tiny"
+                ? "Escuchando (Moonshine local) · Ultra rápido en tu equipo"
+                : "Escuchando (Whisper local) · Habla y haz micro-pausas",
           );
           void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
         },

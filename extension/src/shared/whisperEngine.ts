@@ -1,21 +1,34 @@
 /**
- * Motor de dictado 100% local con Whisper open-source (@huggingface/transformers).
+ * Motor de dictado 100% local con modelos open-source (@huggingface/transformers):
+ *  - Whisper S (`Xenova/whisper-tiny`): multilingüe (ES/EN/PT/FR), rápido, ~40 MB.
+ *  - Whisper M (`Xenova/whisper-base`): multilingüe (ES/EN/PT/FR), más preciso, ~75 MB.
+ *  - Moonshine (`onnx-community/moonshine-tiny-ONNX`): ultra rápido en edge/navegador (~27 MB, EN).
  *
- * Corre en el navegador usando WebGPU (si está disponible) o WASM/ONNX sin enviar
- * audio a servidores externos. Descarga el modelo una única vez y queda en caché.
- *
- * Usa captura a 16 kHz + VAD (detección de actividad de voz) por energía para:
- *  - Enviar nivel RMS en vivo (`onLevel`) al control flotante Bauhaus.
- *  - Transcribir automáticamente cada frase tras una micro-pausa (~750 ms).
+ * Carga los binarios ONNX/WASM localmente desde `chrome-extension://<id>/ort/` para
+ * cumplir 100% con el CSP de Chrome Manifest V3 (cero scripts remotos en CDN).
+ * Incluye pre-roll de 250 ms para no cortar nunca la primera sílaba y VAD rápido (620 ms).
  */
 
 import { cleanDictatedChunk } from "./polish";
 import type { SpeechEngineHandle, SpeechEngineOptions } from "./speechEngine";
 import type { SpeechEngineType } from "./types";
 
-const MODEL_IDS: Record<Exclude<SpeechEngineType, "chrome">, string> = {
-  whisper_tiny: "Xenova/whisper-tiny",
-  whisper_base: "Xenova/whisper-base",
+export type LocalAsrModel = Exclude<SpeechEngineType, "chrome">;
+
+interface ModelSpec {
+  id: string;
+  label: string;
+  isMoonshine?: boolean;
+}
+
+const MODELS: Record<LocalAsrModel, ModelSpec> = {
+  whisper_tiny: { id: "Xenova/whisper-tiny", label: "Whisper S" },
+  whisper_base: { id: "Xenova/whisper-base", label: "Whisper M" },
+  moonshine_tiny: {
+    id: "onnx-community/moonshine-tiny-ONNX",
+    label: "Moonshine",
+    isMoonshine: true,
+  },
 };
 
 type AsrPipeline = (
@@ -37,59 +50,80 @@ function mapWhisperLang(lang?: string): string | undefined {
   return map[base] ?? undefined;
 }
 
-async function loadWhisperPipeline(
-  modelKey: Exclude<SpeechEngineType, "chrome">,
+async function loadLocalPipeline(
+  modelKey: LocalAsrModel,
   onProgress?: (msg: string) => void,
 ): Promise<AsrPipeline> {
-  const modelId = MODEL_IDS[modelKey];
-  const cached = pipelineCache.get(modelId);
+  const spec = MODELS[modelKey];
+  const cached = pipelineCache.get(spec.id);
   if (cached) return cached;
 
   const loader = (async () => {
-    onProgress?.(`Cargando ${modelKey === "whisper_tiny" ? "Whisper S" : "Whisper M"} local…`);
+    onProgress?.(`Iniciando ${spec.label} local…`);
     const { pipeline, env } = await import("@huggingface/transformers");
+
     env.allowLocalModels = false;
     env.useBrowserCache = true;
 
+    // Crucial for Chrome MV3: load ONNX Runtime Web WASM/MJS from local extension bundle
+    const wasmCfg = env.backends?.onnx?.wasm;
+    if (wasmCfg) {
+      wasmCfg.wasmPaths = chrome.runtime.getURL("ort/");
+      wasmCfg.numThreads = 1;
+      wasmCfg.proxy = false;
+    }
+
     const hasWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
-    const device = hasWebGpu ? "webgpu" : "wasm";
-
-    const createPipe = async (dev: "webgpu" | "wasm") =>
-      (await pipeline("automatic-speech-recognition", modelId, {
-        device: dev,
-        dtype: "q8",
-        progress_callback: (info: { status?: string; progress?: number }) => {
-          if (info.status === "progress" && typeof info.progress === "number") {
-            onProgress?.(`Descargando modelo local: ${Math.round(info.progress)}%`);
-          }
-        },
-      })) as unknown as AsrPipeline;
-
-    try {
-      return await createPipe(device);
-    } catch {
-      if (device === "webgpu") {
-        return await createPipe("wasm");
+    const progressCb = (info: { status?: string; progress?: number }) => {
+      if (info.status === "progress" && typeof info.progress === "number") {
+        onProgress?.(`Descargando ${spec.label}: ${Math.round(info.progress)}%`);
       }
-      throw new Error("No se pudo inicializar el motor Whisper local.");
+    };
+
+    const tryCreate = async (device: "webgpu" | "wasm", dtype?: "q8" | "fp32") => {
+      const pipeOpts: Record<string, unknown> = {
+        device,
+        progress_callback: progressCb,
+      };
+      if (dtype) pipeOpts.dtype = dtype;
+      return (await pipeline(
+        "automatic-speech-recognition",
+        spec.id,
+        pipeOpts,
+      )) as unknown as AsrPipeline;
+    };
+
+    // Fast path: WebGPU (q8) -> WASM (q8) -> WASM (default)
+    if (hasWebGpu) {
+      try {
+        return await tryCreate("webgpu", "q8");
+      } catch {
+        // Fallback smoothly to local WASM
+      }
+    }
+    try {
+      return await tryCreate("wasm", "q8");
+    } catch {
+      return await tryCreate("wasm");
     }
   })();
 
-  pipelineCache.set(modelId, loader);
+  pipelineCache.set(spec.id, loader);
   try {
     return await loader;
   } catch (err) {
-    pipelineCache.delete(modelId);
+    pipelineCache.delete(spec.id);
     throw err;
   }
 }
 
 export interface WhisperEngineOptions extends SpeechEngineOptions {
-  model: Exclude<SpeechEngineType, "chrome">;
+  model: LocalAsrModel;
   onStatus?: (status: string) => void;
 }
 
 export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHandle {
+  const spec = MODELS[opts.model];
   let lang = opts.language ?? "es-419";
   let polish = opts.polish ?? true;
   let autoCapitalize = opts.autoCapitalize ?? true;
@@ -103,8 +137,10 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
   let processor: ScriptProcessorNode | null = null;
   let asr: AsrPipeline | null = null;
 
-  // VAD & 16kHz buffer state
+  // 16kHz VAD with 250ms pre-roll ring buffer so first syllables are never clipped
   const TARGET_SR = 16000;
+  const PRE_ROLL_CHUNKS = 3;
+  let preRoll: Float32Array[] = [];
   let chunks: Float32Array[] = [];
   let totalSamples = 0;
   let speechDetected = false;
@@ -147,16 +183,17 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
     try {
       while (pendingQueue.length > 0 && active) {
         const audio = pendingQueue.shift()!;
-        const whisperLang = mapWhisperLang(lang);
-        const result = await asr(audio, {
-          task: "transcribe",
-          ...(whisperLang ? { language: whisperLang } : {}),
-          chunk_length_s: 30,
-          stride_length_s: 5,
-        });
+        const inferOpts = spec.isMoonshine
+          ? {}
+          : {
+              task: "transcribe",
+              ...(mapWhisperLang(lang) ? { language: mapWhisperLang(lang) } : {}),
+              chunk_length_s: 30,
+              stride_length_s: 5,
+            };
 
+        const result = await asr(audio, inferOpts);
         const raw = Array.isArray(result) ? result[0]?.text ?? "" : result?.text ?? "";
-        // Filter Whisper hallucination tags like [Música], (risas), etc.
         const stripped = raw
           .replace(/\[[^\]]*\]|\([^)]*\)/g, " ")
           .replace(/\s+/g, " ")
@@ -178,7 +215,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
           utteranceSeq += 1;
           isNewSentence = /[.!?…]\s*$/.test(cleaned);
           opts.onLive?.({
-            utteranceId: `whisper-${utteranceSeq}`,
+            utteranceId: `local-${utteranceSeq}`,
             text: cleaned,
             isFinal: true,
           });
@@ -187,7 +224,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      opts.onError?.(`Whisper local: ${msg}`, false);
+      opts.onError?.(`${spec.label}: ${msg}`, false);
     } finally {
       transcribing = false;
       if (!active) opts.onInterim?.("");
@@ -195,7 +232,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
   }
 
   function flushSegment() {
-    if (totalSamples < TARGET_SR * 0.35) {
+    if (totalSamples < TARGET_SR * 0.3) {
       chunks = [];
       totalSamples = 0;
       speechDetected = false;
@@ -234,6 +271,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
       if (active) return;
       active = true;
       isNewSentence = true;
+      preRoll = [];
       chunks = [];
       totalSamples = 0;
       speechDetected = false;
@@ -253,7 +291,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
       }
 
       try {
-        asr = await loadWhisperPipeline(opts.model, (status) => {
+        asr = await loadLocalPipeline(opts.model, (status) => {
           opts.onStatus?.(status);
         });
       } catch (err) {
@@ -282,32 +320,39 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
         const rms = Math.sqrt(sum / input.length);
         opts.onLevel?.(rms);
 
+        const down = downsampleTo16k(input, inputSr);
         const frameMs = (input.length / inputSr) * 1000;
-        const VOICE_THRESHOLD = 0.017;
+        const VOICE_THRESHOLD = 0.015;
 
         if (rms >= VOICE_THRESHOLD) {
           if (!speechDetected) {
             speechDetected = true;
             opts.onInterim?.("…");
+            // Prepend pre-roll so the opening syllable is preserved
+            for (const pre of preRoll) {
+              chunks.push(pre);
+              totalSamples += pre.length;
+            }
+            preRoll = [];
           }
           silenceMs = 0;
-          const down = downsampleTo16k(input, inputSr);
           chunks.push(down);
           totalSamples += down.length;
 
-          // Cap max utterance length at 14s for low latency
-          if (totalSamples >= TARGET_SR * 14) {
+          if (totalSamples >= TARGET_SR * 12) {
             flushSegment();
           }
         } else if (speechDetected) {
           silenceMs += frameMs;
-          const down = downsampleTo16k(input, inputSr);
           chunks.push(down);
           totalSamples += down.length;
 
-          if (silenceMs >= 750) {
+          if (silenceMs >= 620) {
             flushSegment();
           }
+        } else {
+          preRoll.push(down);
+          if (preRoll.length > PRE_ROLL_CHUNKS) preRoll.shift();
         }
       };
 
@@ -318,7 +363,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
 
     stop() {
       if (!active) return;
-      if (speechDetected && totalSamples >= TARGET_SR * 0.35) {
+      if (speechDetected && totalSamples >= TARGET_SR * 0.3) {
         flushSegment();
       }
       active = false;

@@ -11,8 +11,9 @@ import { Icon } from "../components/Icon";
 
 const ENGINES: { id: SpeechEngineType; label: string; tip: string }[] = [
   { id: "chrome", label: "CHROME", tip: "Web Speech en tiempo real (0 MB, requiere internet)" },
-  { id: "whisper_tiny", label: "WHISPER S", tip: "Whisper Tiny local (open-source, ~40 MB, offline)" },
-  { id: "whisper_base", label: "WHISPER M", tip: "Whisper Base local (open-source, ~75 MB, más preciso)" },
+  { id: "whisper_tiny", label: "WHISPER S", tip: "Whisper Tiny local (multilingüe ES/EN, ~40 MB, offline)" },
+  { id: "whisper_base", label: "WHISPER M", tip: "Whisper Base local (multilingüe ES/EN, ~75 MB, más preciso)" },
+  { id: "moonshine_tiny", label: "MOONSHINE", tip: "Moonshine Tiny local (ultra rápido, ~27 MB, optimizado EN)" },
 ];
 
 const LANGS = [

@@ -16,7 +16,7 @@ import type { AppConfig, ExtMessage, LiveState } from "../shared/types";
 import { createDrawOverlay } from "./drawOverlay";
 
 const HOST_ID = "reco-ext-host";
-const GUARD_KEY = "__recoOverlayLoaded_v7";
+const GUARD_KEY = "__recoOverlayLoaded_v14";
 const CONTROL_SIZE = 42;
 const TILE_GAP = 8;
 const TILE_STEP = CONTROL_SIZE + TILE_GAP;
@@ -120,6 +120,7 @@ function runOverlay() {
   let fabButtons: HTMLButtonElement[] = [];
   let toastEl: HTMLDivElement | null = null;
   let uiTimerInterval: number | null = null;
+  let drawOverlayHandle: ReturnType<typeof createDrawOverlay> | null = null;
 
   function formatTime(ms: number): string {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -272,6 +273,7 @@ function runOverlay() {
     recBarEl?.classList.toggle("open-right", openRight);
     toastEl?.classList.toggle("open-down", openDown);
     toastEl?.classList.toggle("open-right", openRight);
+    drawOverlayHandle?.syncAnchor();
   }
 
   function ensureOverlay() {
@@ -572,10 +574,14 @@ function runOverlay() {
       void chrome.runtime.sendMessage({ type: "RECORDING_START" } satisfies ExtMessage);
     });
 
-    const drawOverlay = createDrawOverlay((open) => {
-      isDrawingOpen = open;
-      renderState();
-    });
+    const drawOverlay = createDrawOverlay(
+      (open) => {
+        isDrawingOpen = open;
+        renderState();
+      },
+      () => hostEl?.getBoundingClientRect() ?? null,
+    );
+    drawOverlayHandle = drawOverlay;
 
     const btnDraw = document.createElement("button");
     btnDraw.type = "button";
@@ -931,6 +937,18 @@ function runOverlay() {
       triggerErrorFlash();
       showToast(msg.message);
     }
+  });
+
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !changes.reco_ext_config_v1) return;
+    const nextCfg = changes.reco_ext_config_v1.newValue as AppConfig | undefined;
+    if (!nextCfg) return;
+    currentConfig = nextCfg;
+    if (!isDragging && nextCfg.orbPosition) {
+      localPosition = nextCfg.orbPosition;
+    }
+    ensureOverlay();
+    renderState();
   });
 
   async function bootstrap() {
