@@ -76,6 +76,7 @@ type PocketInstance = {
     opts: { voice: string; onChunk?: (audio: Float32Array, meta?: unknown) => void },
   ): Promise<unknown>;
   stop(): Promise<void>;
+  destroy(): void;
 };
 type PocketPlayer = {
   resume(): Promise<void>;
@@ -83,7 +84,8 @@ type PocketPlayer = {
   flush(): void;
   stop(): void;
 };
-let pocketPromise: Promise<{ tts: PocketInstance; StreamingPlayer: new (opts: { sampleRate: number }) => PocketPlayer }> | null = null;
+let pocketPromise: Promise<{ tts: PocketInstance }> | null = null;
+let pocketHasCloning = false;
 let activePocketTts: PocketInstance | null = null;
 let activePocketPlayer: PocketPlayer | null = null;
 let cachedPocketCustomVoiceRef: string | null = null;
@@ -98,19 +100,34 @@ export function invalidateCustomPocketVoice(): void {
   cachedPocketCustomVoiceRef = null;
 }
 
-async function loadPocket(onStatus?: (s: string | null) => void) {
-  if (pocketPromise) return pocketPromise;
+async function loadPocket(needsCloning: boolean, onStatus?: (s: string | null) => void) {
+  // Reuse already-loaded worker! Only recreate if user switches to cloned voice
+  // and current worker was initialized without mimi_encoder.
+  if (pocketPromise && (!needsCloning || pocketHasCloning)) {
+    return pocketPromise;
+  }
+  if (activePocketTts) {
+    try {
+      activePocketTts.destroy();
+    } catch {
+      // ignore
+    }
+    activePocketTts = null;
+    pocketPromise = null;
+    cachedPocketBuiltInVoices.clear();
+    cachedPocketCustomVoiceRef = null;
+  }
 
+  pocketHasCloning = needsCloning;
   pocketPromise = (async () => {
-    onStatus?.("Preparando Pocket TTS (español)…");
+    onStatus?.(needsCloning ? "Preparando Pocket TTS + clonación…" : "Preparando Pocket TTS (español)…");
     const mod = (await import("pocket-tts-js")) as unknown as {
       PocketTTS: new (opts: Record<string, unknown>) => PocketInstance;
-      StreamingPlayer: new (opts: { sampleRate: number }) => PocketPlayer;
     };
     const tts = new mod.PocketTTS({
       language: "spanish",
       quantized: true,
-      voiceCloning: true,
+      voiceCloning: needsCloning,
       ortBaseUrl: chrome.runtime.getURL("ort/"),
       maxThreads: 1,
       cache: true,
@@ -125,13 +142,14 @@ async function loadPocket(onStatus?: (s: string | null) => void) {
       }
     });
     onStatus?.(null);
-    return { tts, StreamingPlayer: mod.StreamingPlayer };
+    return { tts };
   })();
 
   try {
     return await pocketPromise;
   } catch (err) {
     pocketPromise = null;
+    pocketHasCloning = false;
     activePocketTts = null;
     onStatus?.(null);
     throw err;
@@ -254,6 +272,53 @@ async function loadKokoro(onStatus?: (s: string | null) => void): Promise<Kokoro
   }
 }
 
+let cachedPiperPhonemizeUrls: Promise<{ piperWasm: string; piperData: string }> | null = null;
+
+async function getCachedPiperPhonemizeUrls(
+  defaultWasm: string,
+  defaultData: string,
+  onStatus?: (s: string | null) => void,
+): Promise<{ piperWasm: string; piperData: string }> {
+  if (cachedPiperPhonemizeUrls) return cachedPiperPhonemizeUrls;
+
+  cachedPiperPhonemizeUrls = (async () => {
+    const fetchAsBlobUrl = async (url: string, mime: string, label: string) => {
+      let cache: Cache | null = null;
+      try {
+        if (typeof caches !== "undefined") cache = await caches.open("reco-piper-assets-v1");
+      } catch {
+        cache = null;
+      }
+      if (cache) {
+        const hit = await cache.match(url).catch(() => undefined);
+        if (hit) {
+          const buf = await hit.arrayBuffer();
+          return URL.createObjectURL(new Blob([buf], { type: mime }));
+        }
+      }
+      onStatus?.(`Descargando ${label} (1 sola vez)…`);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} (${label})`);
+      if (cache) void cache.put(url, res.clone()).catch(() => {});
+      const buf = await res.arrayBuffer();
+      return URL.createObjectURL(new Blob([buf], { type: mime }));
+    };
+
+    const [piperWasm, piperData] = await Promise.all([
+      fetchAsBlobUrl(defaultWasm, "application/wasm", "Piper WASM"),
+      fetchAsBlobUrl(defaultData, "application/octet-stream", "Piper fonemas"),
+    ]);
+    return { piperWasm, piperData };
+  })();
+
+  try {
+    return await cachedPiperPhonemizeUrls;
+  } catch (err) {
+    cachedPiperPhonemizeUrls = null;
+    throw err;
+  }
+}
+
 async function loadPiper(
   voiceId: string,
   onStatus?: (s: string | null) => void,
@@ -267,24 +332,29 @@ async function loadPiper(
     const piper = await import("@mintplex-labs/piper-tts-web");
     const localOrt = chrome.runtime.getURL("ort/");
 
-    // Workaround for piper-tts-web@1.0.5 bug: constructor calls this.init() BEFORE
-    // setting private #wasmPaths, so we must patch TtsSession.WASM_LOCATIONS first
-    // AND clear the static _instance singleton when switching voices.
     const TtsSessionAny = piper.TtsSession as unknown as {
       WASM_LOCATIONS: { onnxWasm: string; piperData: string; piperWasm: string };
       _instance: unknown;
     };
+    const origWasm = TtsSessionAny.WASM_LOCATIONS.piperWasm;
+    const origData = TtsSessionAny.WASM_LOCATIONS.piperData;
+    const localAssets = await getCachedPiperPhonemizeUrls(origWasm, origData, onStatus);
+
+    // Workaround for piper-tts-web@1.0.5 bug: constructor calls this.init() BEFORE
+    // setting private #wasmPaths, so we must patch TtsSession.WASM_LOCATIONS first
+    // AND clear the static _instance singleton when switching voices.
     TtsSessionAny.WASM_LOCATIONS.onnxWasm = localOrt;
+    TtsSessionAny.WASM_LOCATIONS.piperWasm = localAssets.piperWasm;
+    TtsSessionAny.WASM_LOCATIONS.piperData = localAssets.piperData;
     TtsSessionAny._instance = null;
 
-    const defaults = TtsSessionAny.WASM_LOCATIONS;
     const session = await withTimeout(
       piper.TtsSession.create({
         voiceId: validVoice,
         wasmPaths: {
           onnxWasm: localOrt,
-          piperData: defaults.piperData,
-          piperWasm: defaults.piperWasm,
+          piperData: localAssets.piperData,
+          piperWasm: localAssets.piperWasm,
         },
         progress: (p) => {
           if (p.total > 0) {
@@ -293,7 +363,7 @@ async function loadPiper(
           }
         },
       }),
-      35_000,
+      40_000,
       "Piper init",
     );
     onStatus?.(null);
@@ -310,6 +380,8 @@ async function loadPiper(
   }
 }
 
+let cachedMossPromptFile: unknown | null = null;
+
 async function synthesizeMossAudioUrl(
   text: string,
   parentSignal: AbortSignal | undefined,
@@ -317,37 +389,65 @@ async function synthesizeMossAudioUrl(
 ): Promise<string> {
   onStatus?.("Sintetizando con MOSS-TTS-Nano…");
 
-  const timedInfo = makeTimedSignal(parentSignal, 10_000);
-  let info: { named_endpoints?: Record<string, { parameters?: Array<{ parameter_name?: string }> }> };
-  try {
-    const infoRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/info`, {
-      signal: timedInfo.signal,
-    });
-    if (!infoRes.ok) throw new Error(`MOSS Space HTTP ${infoRes.status}`);
-    info = (await infoRes.json()) as typeof info;
-  } finally {
-    timedInfo.cleanup();
+  if (!cachedMossPromptFile) {
+    const tDemo = makeTimedSignal(parentSignal, 10_000);
+    try {
+      const r1 = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/apply_demo_case_selection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: ["demo-1", null] }),
+        signal: tDemo.signal,
+      });
+      if (r1.ok) {
+        const { event_id } = (await r1.json()) as { event_id?: string };
+        if (event_id) {
+          const r2 = await fetch(
+            `${MOSS_SPACE_BASE}/gradio_api/call/apply_demo_case_selection/${event_id}`,
+            { signal: tDemo.signal },
+          );
+          if (r2.ok) {
+            const txt = await r2.text();
+            const line = txt.split("\n").reverse().find((l) => l.startsWith("data:") && l.slice(5).trim() !== "null");
+            if (line) {
+              const arr = JSON.parse(line.slice(5).trim()) as unknown[];
+              cachedMossPromptFile = arr?.[1] ?? null;
+            }
+          }
+        }
+      }
+    } finally {
+      tDemo.cleanup();
+    }
   }
 
-  const endpoints = Object.keys(info.named_endpoints ?? {});
-  const ep =
-    endpoints.find((k) => /generate|tts|synthesize|predict/i.test(k)) ??
-    endpoints[0] ??
-    "/predict";
-  const epClean = ep.startsWith("/") ? ep.slice(1) : ep;
-  const params = info.named_endpoints?.[ep]?.parameters ?? [];
-  const dataPayload = params.length <= 1 ? [text] : [text, ...params.slice(1).map(() => null)];
+  const dataPayload = [
+    text,
+    cachedMossPromptFile,
+    true,
+    true,
+    250,
+    75,
+    true,
+    1.0,
+    1.0,
+    50,
+    0.8,
+    0.95,
+    25,
+    1.2,
+    0,
+  ];
 
   const timedCall = makeTimedSignal(parentSignal, 10_000);
   let eventId = "";
   try {
-    const callRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/${epClean}`, {
+    const callRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/run_inference`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ data: dataPayload }),
       signal: timedCall.signal,
     });
-    if (!callRes.ok) throw new Error(`MOSS call HTTP ${callRes.status}`);
+    if (!callRes.ok) throw new Error(`MOSS HTTP ${callRes.status}`);
     const payload = (await callRes.json()) as { event_id?: string };
     eventId = payload.event_id ?? "";
   } finally {
@@ -358,7 +458,7 @@ async function synthesizeMossAudioUrl(
   const timedSse = makeTimedSignal(parentSignal, 14_000);
   let bodyText = "";
   try {
-    const sseRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/${epClean}/${eventId}`, {
+    const sseRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/run_inference/${eventId}`, {
       signal: timedSse.signal,
     });
     if (!sseRes.ok) throw new Error(`MOSS stream HTTP ${sseRes.status}`);
@@ -368,7 +468,7 @@ async function synthesizeMossAudioUrl(
   }
 
   if (/\bevent:\s*error\b/i.test(bodyText)) {
-    throw new Error("MOSS Space devolvió error");
+    throw new Error("HF Space sin cuota ZeroGPU");
   }
   const dataLine = bodyText
     .split("\n")
@@ -485,6 +585,7 @@ function speakSystem(text: string, voiceUri?: string, speed?: number): Promise<v
       return;
     }
     window.speechSynthesis.cancel();
+    window.speechSynthesis.resume();
     const u = new SpeechSynthesisUtterance(text);
     const voices = window.speechSynthesis.getVoices();
     const match =
@@ -501,6 +602,18 @@ function speakSystem(text: string, voiceUri?: string, speed?: number): Promise<v
     u.onerror = () => resolve();
     window.speechSynthesis.speak(u);
   });
+}
+
+function concatFloat32(chunks: Float32Array[]): Float32Array {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const c of chunks) {
+    out.set(c, offset);
+    offset += c.length;
+  }
+  return out;
 }
 
 export async function speakReply(opts: {
@@ -528,17 +641,34 @@ export async function speakReply(opts: {
   if (opts.mode === "supertonic") {
     try {
       const sentences = splitIntoSentences(clean);
-      for (const sentence of sentences) {
-        if (seq !== speakSeq) break;
-        const { audio, sampleRate } = await synthesizeSupertonicSentence({
-          text: sentence,
-          voice: opts.voice,
-          speed,
-          steps: 5,
-          onStatus: opts.onStatus,
-        });
+      // Pipeline lookahead: synthesize next sentence while current sentence plays!
+      let nextSynth: Promise<{ audio: Float32Array; sampleRate: number }> | null =
+        sentences.length > 0
+          ? synthesizeSupertonicSentence({
+              text: sentences[0],
+              voice: opts.voice,
+              speed,
+              steps: 3,
+              onStatus: opts.onStatus,
+            })
+          : null;
+
+      for (let i = 0; i < sentences.length; i++) {
+        if (seq !== speakSeq || !nextSynth) break;
+        const { audio, sampleRate } = await nextSynth;
         if (seq !== speakSeq) break;
         opts.onStatus?.(null);
+
+        nextSynth =
+          i + 1 < sentences.length
+            ? synthesizeSupertonicSentence({
+                text: sentences[i + 1],
+                voice: opts.voice,
+                speed,
+                steps: 3,
+              })
+            : null;
+
         await playPcm(audio, sampleRate, seq);
       }
       opts.onStatus?.(null);
@@ -558,11 +688,12 @@ export async function speakReply(opts: {
 
   if (opts.mode === "pocket") {
     try {
-      const { tts, StreamingPlayer } = await loadPocket(opts.onStatus);
+      const needsCloning = opts.voice === "__custom__";
+      const { tts } = await loadPocket(needsCloning, opts.onStatus);
       if (seq !== speakSeq) return;
 
       let voiceRef: string;
-      if (opts.voice === "__custom__") {
+      if (needsCloning) {
         if (cachedPocketCustomVoiceRef) {
           voiceRef = cachedPocketCustomVoiceRef;
         } else {
@@ -591,22 +722,26 @@ export async function speakReply(opts: {
       }
 
       if (seq !== speakSeq) return;
-      opts.onStatus?.(null);
 
-      const player = new StreamingPlayer({ sampleRate: tts.sampleRate });
-      activePocketPlayer = player;
-      await player.resume();
-
-      await tts.generate(clean, {
-        voice: voiceRef,
-        onChunk: (audio, meta) => {
-          if (seq === speakSeq && activePocketPlayer === player) {
-            player.play(audio, meta);
-          }
-        },
-      });
-      if (seq === speakSeq && activePocketPlayer === player) {
-        player.flush();
+      // Buffer each sentence into a single seamless Float32Array to eliminate
+      // choppy underrun cuts on single-threaded WASM!
+      const sentences = splitIntoSentences(clean);
+      for (const sentence of sentences) {
+        if (seq !== speakSeq) break;
+        const chunks: Float32Array[] = [];
+        await tts.generate(sentence, {
+          voice: voiceRef,
+          onChunk: (audio) => {
+            if (seq === speakSeq && audio && audio.length > 0) {
+              chunks.push(new Float32Array(audio));
+            }
+          },
+        });
+        if (seq !== speakSeq) break;
+        opts.onStatus?.(null);
+        if (chunks.length > 0) {
+          await playPcm(concatFloat32(chunks), tts.sampleRate, seq);
+        }
       }
       opts.onStatus?.(null);
       return;

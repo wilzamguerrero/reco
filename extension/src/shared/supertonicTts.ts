@@ -196,14 +196,35 @@ async function loadSupertonic(onStatus?: (s: string | null) => void): Promise<Su
     onStatus?.("Supertonic-3 · compilando motor local…");
     const { dataPath, data: vecExternalData } = unpackVectorEstimatorQ8(vecQ8Bytes);
 
-    const opts: ort.InferenceSession.SessionOptions = { executionProviders: ["wasm"] };
-    const dpOrt = await ort.InferenceSession.create(dpBytes, opts);
-    const textEncOrt = await ort.InferenceSession.create(textEncBytes, opts);
-    const vectorEstOrt = await ort.InferenceSession.create(vecGraphBytes, {
-      ...opts,
+    const hasWebGpu = typeof navigator !== "undefined" && "gpu" in navigator;
+    const createSess = async (
+      bytes: Uint8Array,
+      extra?: Partial<ort.InferenceSession.SessionOptions>,
+    ): Promise<ort.InferenceSession> => {
+      if (hasWebGpu) {
+        try {
+          return await ort.InferenceSession.create(bytes, {
+            ...extra,
+            executionProviders: ["webgpu", "wasm"],
+            graphOptimizationLevel: "all",
+          });
+        } catch {
+          // Fall back cleanly to WASM
+        }
+      }
+      return ort.InferenceSession.create(bytes, {
+        ...extra,
+        executionProviders: ["wasm"],
+        graphOptimizationLevel: "all",
+      });
+    };
+
+    const dpOrt = await createSess(dpBytes);
+    const textEncOrt = await createSess(textEncBytes);
+    const vectorEstOrt = await createSess(vecGraphBytes, {
       externalData: [{ path: dataPath, data: vecExternalData }],
     });
-    const vocoderOrt = await ort.InferenceSession.create(vocoderBytes, opts);
+    const vocoderOrt = await createSess(vocoderBytes);
 
     onStatus?.(null);
     return { cfg, indexer, dpOrt, textEncOrt, vectorEstOrt, vocoderOrt };
@@ -343,10 +364,12 @@ export async function synthesizeSupertonicSentence(opts: {
 
   const latentMask = new Float32Array(latentLen).fill(1.0);
   const latentMaskTensor = new ort.Tensor("float32", latentMask, [1, 1, latentLen]);
-  const totalSteps = opts.steps ?? 5;
+  const totalSteps = opts.steps ?? 3;
   const totalStepTensor = new ort.Tensor("float32", new Float32Array([totalSteps]), [1]);
 
   for (let step = 0; step < totalSteps; step++) {
+    // Yield briefly so the browser UI stays fluid during WASM fallback
+    await new Promise((r) => window.setTimeout(r, 0));
     const vecOut = await engine.vectorEstOrt.run({
       noisy_latent: new ort.Tensor("float32", xt, [1, latentDimVal, latentLen]),
       text_emb: textEncOut.text_emb,
