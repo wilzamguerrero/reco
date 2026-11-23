@@ -27,11 +27,10 @@ import {
   saveChatSummary,
 } from "./storage";
 import type {
+  AgentBatchStep,
   AiProviderId,
   AppConfig,
-  BrowserActionPayload,
   ExtMessage,
-  PageActionPayload,
   PersistedChatAttachment,
   PersistedChatMessage,
   SpeechEngineType,
@@ -42,7 +41,7 @@ const VISION_INTENT_RE =
   /\b(mira|míra|mirar|observa|ver|ves|veo|viendo|puedes ver|qué ves|que ves|qué hay|que hay|revisa|pantalla|página|pagina|estoy haciendo|hago|estoy viendo|dibuj\w*|trazo|trazos|pizarra|bosquejo|esquema|analiza esto|mira esto|captura|imagen|foto|aquí|aqui|esto que)\b/i;
 
 const PAGE_INTERACT_INTENT_RE =
-  /\b(abr\w*|clic\w*|click\w*|puls\w*|presion\w*|toc\w*|dale|seleccion\w*|elig\w*|escrib\w*|redact\w*|edit\w*|modific\w*|reemplaz\w*|pon\w*|llen\w*|rellen\w*|borr\w*|peg\w*|aplic\w*|hazlo|haz|hagas|busc\w*|encuentr\w*|envi\w*|enví\w*|mand\w*|respond\w*|baj\w*|sub\w*|scroll|desplaz\w*|entr\w*|ve a|ir a|naveg\w*|pestañ\w*|tab|tabs|cambi\w*|pásat\w*|pasat\w*|salt\w*|regres\w*|vuelv\w*|cierr\w*|duplic\w*|fij\w*|silenci\w*|mute\w*|marcador\w*|favorit\w*|historial|google|correo\w*|email|mail|mensaje\w*|botón|boton\w*|campo\w*|editor|texto|párrafo|parrafo|documento|enlace\w*|link\w*|formulario|asunto|destinatario|resalt\w*|señal\w*|senal\w*|marc\w*|subray\w*|encuadr\w*|recuadro\w*|apunt\w*|indic\w*|muestr\w*|dónde está|donde esta|dónde dice|donde dice|copi\w*|atrás|atras|adelante|recarg\w*|refresc\w*|quit\w*|limpi\w*)/i;
+  /\b(abr\w*|clic\w*|click\w*|puls\w*|presion\w*|toc\w*|dale|seleccion\w*|elig\w*|escrib\w*|redact\w*|edit\w*|modific\w*|reemplaz\w*|pon\w*|llen\w*|rellen\w*|borr\w*|peg\w*|adjunt\w*|recort\w*|captur\w*|sub\w*|aplic\w*|hazlo|haz|hagas|busc\w*|encuentr\w*|envi\w*|enví\w*|mand\w*|respond\w*|baj\w*|scroll|desplaz\w*|entr\w*|ve a|ir a|naveg\w*|pestañ\w*|tab|tabs|cambi\w*|pásat\w*|pasat\w*|salt\w*|regres\w*|vuelv\w*|cierr\w*|duplic\w*|fij\w*|silenci\w*|mute\w*|marcador\w*|favorit\w*|historial|google|correo\w*|email|mail|mensaje\w*|botón|boton\w*|campo\w*|editor|texto|párrafo|parrafo|documento|enlace\w*|link\w*|formulario|asunto|destinatario|resalt\w*|señal\w*|senal\w*|marc\w*|subray\w*|encuadr\w*|recuadro\w*|apunt\w*|indic\w*|muestr\w*|dónde está|donde esta|dónde dice|donde dice|copi\w*|atrás|atras|adelante|recarg\w*|refresc\w*|quit\w*|limpi\w*|imagen\w*|foto\w*|personaje\w*|conejo|dibuj\w*)/i;
 
 const catalogCache = new Map<string, { at: number; models: FreePiModel[] }>();
 
@@ -112,6 +111,9 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:PAGE_SCROLL|<down|up|top|bottom>]] -> desplazar la página\n" +
     "- [[ACTION:PAGE_SCROLL_TO|<id_o_texto>]] -> desplazar la vista directamente hasta un elemento o sección\n" +
     "- [[ACTION:PAGE_COPY|<texto>]] -> copiar un texto o enlace al portapapeles del usuario\n" +
+    "- [[ACTION:PAGE_CROP_ELEMENT|<id_o_texto>]] -> recortar con precisión exacta de píxeles cualquier elemento o `<img>` de la página usando su caja DOM (método preferido para imágenes/tarjetas en webs normales)\n" +
+    "- [[ACTION:PAGE_CROP_IMAGE|<x_pct>|<y_pct>|<w_pct>|<h_pct>]] -> recortar una zona específica (en porcentaje 0-100 de izquierda, arriba, ancho, alto) de la última captura de pantalla para aislar SOLO un objeto/personaje dentro de un `<canvas>` (como Excalidraw/Figma) o una sub-región de una imagen\n" +
+    "- [[ACTION:PAGE_PASTE_IMAGE|<id_o_active_opcional>]] -> pegar/adjuntar automáticamente la imagen recortada (o última captura) en el campo/editor/subida de archivos de la página activa (funciona en Google IA, ChatGPT, Gemini, WhatsApp, Gmail, Notion, etc.)\n" +
     "- [[ACTION:PAGE_BACK]] / [[ACTION:PAGE_FORWARD]] / [[ACTION:PAGE_RELOAD]] -> volver atrás, ir adelante o recargar la pestaña\n" +
     "- [[ACTION:PAGE_NAVIGATE|<url>]] -> abrir una URL en la pestaña actual\n" +
     "- [[ACTION:PAGE_OPEN_TAB|<url>]] -> abrir una URL en una pestaña nueva\n" +
@@ -124,7 +126,7 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:BROWSER_SEARCH|<consulta>]] -> buscar en Google en una pestaña nueva\n" +
     "- [[ACTION:BROWSER_BOOKMARK]] -> guardar la página actual en marcadores/favoritos\n" +
     "- [[ACTION:BROWSER_HISTORY|<consulta>]] -> buscar y abrir una página del historial del navegador\n" +
-    "SÍ tienes visión y SÍ tienes control completo del navegador y de la página activa: puedes cambiar entre pestañas abiertas (`TAB_SWITCH`), cerrar/abrir/fijar/silenciar/duplicar pestañas, buscar en Google, guardar marcadores, abrir del historial, encerrar imágenes o textos en un recuadro brillante (`PAGE_HIGHLIGHT` / `PAGE_FIND`), hacer clic, abrir correos o enlaces, escribir en campos, copiar al portapapeles, hacer scroll y navegar. " +
+    "SÍ tienes visión y SÍ tienes control completo del navegador y de la página activa: puedes cambiar entre pestañas abiertas (`TAB_SWITCH`), cerrar/abrir/fijar/silenciar/duplicar pestañas, buscar en Google, guardar marcadores, abrir del historial, recortar una parte específica de la pantalla (`PAGE_CROP_IMAGE`) y pegarla/adjuntarla en otra pestaña (`PAGE_PASTE_IMAGE`), encerrar imágenes o textos en un recuadro brillante (`PAGE_HIGHLIGHT` / `PAGE_FIND`), seleccionar texto de forma nativa (`PAGE_SELECT`), hacer clic, abrir correos o enlaces, escribir o reemplazar texto en cualquier editor, copiar al portapapeles, hacer scroll y navegar. " +
     "Cuando el usuario te pida ver, cambiar de pestaña, señalar o hacer algo, recibirás la lista de pestañas abiertas del navegador, los elementos visibles de la página activa (incluidas imágenes y títulos) y captura de pantalla cuando aplique. " +
     "Puedes encadenar varias acciones si los elementos ya están visibles; si primero necesitas abrir un formulario (por ejemplo pulsar 'Redactar' o 'Correo nuevo'), haz clic primero y avisa que ya quedó abierto. " +
     "Por seguridad, nunca pulses botones de Enviar, Eliminar o Pagar a menos que el usuario te lo pida explícitamente."
@@ -138,102 +140,98 @@ export function stripActionTags(raw: string): string {
 export async function executeActionTags(raw: string): Promise<string[]> {
   const executed: string[] = [];
   const matches = Array.from(raw.matchAll(/\[\[ACTION:([A-Z_]+)(?:\|([^\]]+))?\]\]/g));
-  let hadPageAction = false;
-
-  const runPageAction = async (action: PageActionPayload, label: string) => {
-    if (hadPageAction) {
-      await new Promise((r) => setTimeout(r, 120));
-    }
-    hadPageAction = true;
-    await chrome.runtime
-      .sendMessage({ type: "EXECUTE_PAGE_ACTION", action } satisfies ExtMessage)
-      .catch(() => {});
-    executed.push(label);
-  };
-
-  const runBrowserAction = async (action: BrowserActionPayload, label: string) => {
-    if (hadPageAction) {
-      await new Promise((r) => setTimeout(r, 120));
-    }
-    hadPageAction = true;
-    await chrome.runtime
-      .sendMessage({ type: "EXECUTE_BROWSER_ACTION", action } satisfies ExtMessage)
-      .catch(() => {});
-    executed.push(label);
-  };
+  const batchSteps: AgentBatchStep[] = [];
 
   for (const m of matches) {
     const cmd = m[1];
     const arg = (m[2] ?? "").trim();
 
     if (cmd === "TAB_SWITCH" && arg) {
-      await runBrowserAction({ kind: "switch_tab", target: arg }, `pestaña: ${arg}`);
+      batchSteps.push({ scope: "browser", action: { kind: "switch_tab", target: arg }, label: `pestaña: ${arg}` });
     } else if (cmd === "TAB_CLOSE") {
-      await runBrowserAction({ kind: "close_tab", target: arg || "current" }, "pestaña cerrada");
+      batchSteps.push({ scope: "browser", action: { kind: "close_tab", target: arg || "current" }, label: "pestaña cerrada" });
     } else if (cmd === "TAB_NEW") {
-      await runBrowserAction({ kind: "new_tab", urlOrQuery: arg || undefined }, "nueva pestaña");
+      batchSteps.push({ scope: "browser", action: { kind: "new_tab", urlOrQuery: arg || undefined }, label: "nueva pestaña" });
     } else if (cmd === "TAB_DUPLICATE") {
-      await runBrowserAction({ kind: "duplicate_tab" }, "pestaña duplicada");
+      batchSteps.push({ scope: "browser", action: { kind: "duplicate_tab" }, label: "pestaña duplicada" });
     } else if (cmd === "TAB_PIN") {
-      await runBrowserAction({ kind: "pin_tab" }, "pestaña fijada");
+      batchSteps.push({ scope: "browser", action: { kind: "pin_tab" }, label: "pestaña fijada" });
     } else if (cmd === "TAB_MUTE") {
-      await runBrowserAction({ kind: "mute_tab", target: arg || "current" }, "audio pestaña");
+      batchSteps.push({ scope: "browser", action: { kind: "mute_tab", target: arg || "current" }, label: "audio pestaña" });
     } else if (cmd === "BROWSER_SEARCH" && arg) {
-      await runBrowserAction({ kind: "search_web", query: arg }, `buscar: ${arg}`);
+      batchSteps.push({ scope: "browser", action: { kind: "search_web", query: arg }, label: `buscar: ${arg}` });
     } else if (cmd === "BROWSER_BOOKMARK") {
-      await runBrowserAction({ kind: "bookmark_current" }, "marcador guardado");
+      batchSteps.push({ scope: "browser", action: { kind: "bookmark_current" }, label: "marcador guardado" });
     } else if (cmd === "BROWSER_HISTORY" && arg) {
-      await runBrowserAction({ kind: "open_history", query: arg }, `historial: ${arg}`);
+      batchSteps.push({ scope: "browser", action: { kind: "open_history", query: arg }, label: `historial: ${arg}` });
     } else if (cmd === "PAGE_CLICK" && arg) {
-      await runPageAction({ kind: "click", target: arg }, `clic: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "click", target: arg }, label: `clic: ${arg}` });
     } else if (cmd === "PAGE_CLICK_XY" && arg) {
       const parts = arg.split("|").map((s) => Number(s.trim().replace("%", "")));
       if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
-        await runPageAction({ kind: "click_xy", xPct: parts[0], yPct: parts[1] }, `clic XY: ${parts[0]}%,${parts[1]}%`);
+        batchSteps.push({
+          scope: "page",
+          action: { kind: "click_xy", xPct: parts[0], yPct: parts[1] },
+          label: `clic XY: ${parts[0]}%,${parts[1]}%`,
+        });
       }
     } else if ((cmd === "PAGE_TYPE" || cmd === "PAGE_REPLACE") && arg) {
       const sep = arg.indexOf("|");
       const target = sep >= 0 ? arg.slice(0, sep).trim() : "active";
       const text = sep >= 0 ? arg.slice(sep + 1) : arg;
       if (text) {
-        await runPageAction(
-          { kind: "type", target: target || "active", text, clear: cmd === "PAGE_REPLACE" },
-          `${cmd === "PAGE_REPLACE" ? "reemplazar" : "escribir"}: ${target || "active"}`,
-        );
+        batchSteps.push({
+          scope: "page",
+          action: { kind: "type", target: target || "active", text, clear: cmd === "PAGE_REPLACE" },
+          label: `${cmd === "PAGE_REPLACE" ? "reemplazar" : "escribir"}: ${target || "active"}`,
+        });
       }
     } else if (cmd === "PAGE_PRESS" && arg) {
-      await runPageAction({ kind: "press", key: arg }, `tecla: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "press", key: arg }, label: `tecla: ${arg}` });
     } else if (cmd === "PAGE_HIGHLIGHT" && arg) {
       const sep = arg.indexOf("|");
       const target = sep >= 0 ? arg.slice(0, sep).trim() : arg;
       const label = sep >= 0 ? arg.slice(sep + 1).trim() : undefined;
       if (target) {
-        await runPageAction({ kind: "highlight", target, label }, `resaltar: ${target}`);
+        batchSteps.push({ scope: "page", action: { kind: "highlight", target, label }, label: `resaltar: ${target}` });
       }
     } else if (cmd === "PAGE_CLEAR_HIGHLIGHTS") {
-      await runPageAction({ kind: "clear_highlights" }, "limpiar resaltados");
+      batchSteps.push({ scope: "page", action: { kind: "clear_highlights" }, label: "limpiar resaltados" });
     } else if (cmd === "PAGE_FIND" && arg) {
-      await runPageAction({ kind: "find_text", query: arg }, `buscar texto: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "find_text", query: arg }, label: `buscar texto: ${arg}` });
     } else if (cmd === "PAGE_SELECT" && arg) {
-      await runPageAction({ kind: "select_text", query: arg }, `seleccionar: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "select_text", query: arg }, label: `seleccionar: ${arg}` });
     } else if (cmd === "PAGE_SELECT_ALL") {
-      await runPageAction({ kind: "select_text", query: "", all: true }, "seleccionar todo");
+      batchSteps.push({ scope: "page", action: { kind: "select_text", query: "", all: true }, label: "seleccionar todo" });
     } else if (cmd === "PAGE_SCROLL_TO" && arg) {
-      await runPageAction({ kind: "scroll_to", target: arg }, `ir al elemento: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "scroll_to", target: arg }, label: `ir al elemento: ${arg}` });
     } else if (cmd === "PAGE_COPY" && arg) {
-      await runPageAction({ kind: "copy", text: arg }, "copiado al portapapeles");
+      batchSteps.push({ scope: "page", action: { kind: "copy", text: arg }, label: "copiado al portapapeles" });
+    } else if (cmd === "PAGE_CROP_ELEMENT" && arg) {
+      batchSteps.push({ scope: "browser", action: { kind: "crop_element", target: arg }, label: `recortar elemento: ${arg}` });
+    } else if (cmd === "PAGE_CROP_IMAGE" && arg) {
+      const nums = arg.split("|").map((s) => Number(s.trim().replace("%", "")));
+      if (nums.length >= 4 && nums.every((n) => Number.isFinite(n))) {
+        batchSteps.push({
+          scope: "browser",
+          action: { kind: "crop_image", xPct: nums[0], yPct: nums[1], wPct: nums[2], hPct: nums[3] },
+          label: "imagen recortada",
+        });
+      }
+    } else if (cmd === "PAGE_PASTE_IMAGE") {
+      batchSteps.push({ scope: "page", action: { kind: "paste_image", target: arg || undefined }, label: "imagen pegada" });
     } else if (cmd === "PAGE_BACK") {
-      await runPageAction({ kind: "history", direction: "back" }, "atrás");
+      batchSteps.push({ scope: "page", action: { kind: "history", direction: "back" }, label: "atrás" });
     } else if (cmd === "PAGE_FORWARD") {
-      await runPageAction({ kind: "history", direction: "forward" }, "adelante");
+      batchSteps.push({ scope: "page", action: { kind: "history", direction: "forward" }, label: "adelante" });
     } else if (cmd === "PAGE_RELOAD") {
-      await runPageAction({ kind: "history", direction: "reload" }, "recargar");
+      batchSteps.push({ scope: "page", action: { kind: "history", direction: "reload" }, label: "recargar" });
     } else if (cmd === "PAGE_SCROLL" && (arg === "up" || arg === "down" || arg === "top" || arg === "bottom")) {
-      await runPageAction({ kind: "scroll", direction: arg }, `scroll: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "scroll", direction: arg }, label: `scroll: ${arg}` });
     } else if (cmd === "PAGE_NAVIGATE" && arg) {
-      await runPageAction({ kind: "navigate", url: arg, newTab: false }, `ir a: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "navigate", url: arg, newTab: false }, label: `ir a: ${arg}` });
     } else if (cmd === "PAGE_OPEN_TAB" && arg) {
-      await runPageAction({ kind: "navigate", url: arg, newTab: true }, `nueva pestaña: ${arg}`);
+      batchSteps.push({ scope: "page", action: { kind: "navigate", url: arg, newTab: true }, label: `nueva pestaña: ${arg}` });
     } else if (cmd === "START_RECORDING") {
       await chrome.runtime.sendMessage({ type: "RECORDING_START" } satisfies ExtMessage).catch(() => {});
       executed.push("grabación iniciada");
@@ -293,6 +291,15 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       await chrome.runtime.sendMessage({ type: "CONFIG_UPDATED", config: next } satisfies ExtMessage).catch(() => {});
       executed.push(`modelo: ${arg}`);
     }
+  }
+
+  // Execute all page & browser steps atomically inside the Service Worker so tab switches
+  // never throttle/stall multi-step chains (e.g. crop -> switch tab -> paste image -> type)
+  if (batchSteps.length > 0) {
+    await chrome.runtime
+      .sendMessage({ type: "RUN_ACTION_BATCH", steps: batchSteps } satisfies ExtMessage)
+      .catch(() => {});
+    for (const s of batchSteps) executed.push(s.label);
   }
 
   return executed;

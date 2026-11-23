@@ -10,7 +10,14 @@
  */
 
 import { getConfig, upsertDictationNote, upsertRecording } from "../shared/storage";
-import type { ExtMessage, LiveState, RecordingItem } from "../shared/types";
+import type {
+  AgentBatchStep,
+  BrowserActionPayload,
+  ExtMessage,
+  LiveState,
+  PageActionPayload,
+  RecordingItem,
+} from "../shared/types";
 
 const OFFSCREEN_URL = "offscreen.html";
 const BRIDGE_URL = chrome.runtime.getURL("bridge.html");
@@ -114,6 +121,48 @@ let nativePort: chrome.runtime.Port | null = null;
 let lastCommandAt = 0;
 let lastLiveHandledInPage = false;
 let currentDictationSessionId: string | null = null;
+let lastCapturedScreenDataUrl: string | null = null;
+let lastCroppedImageDataUrl: string | null = null;
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  return `data:${blob.type || "image/png"};base64,${btoa(binary)}`;
+}
+
+async function cropDataUrlRegion(
+  dataUrl: string,
+  xPct: number,
+  yPct: number,
+  wPct: number,
+  hPct: number,
+): Promise<string> {
+  const resp = await fetch(dataUrl);
+  const blob = await resp.blob();
+  const bmp = await createImageBitmap(blob);
+  try {
+    const x = Math.max(0, Math.min(99, xPct));
+    const y = Math.max(0, Math.min(99, yPct));
+    const w = Math.max(2, Math.min(100 - x, wPct));
+    const h = Math.max(2, Math.min(100 - y, hPct));
+    const sx = Math.round((x / 100) * bmp.width);
+    const sy = Math.round((y / 100) * bmp.height);
+    const sw = Math.max(16, Math.min(bmp.width - sx, Math.round((w / 100) * bmp.width)));
+    const sh = Math.max(16, Math.min(bmp.height - sy, Math.round((h / 100) * bmp.height)));
+    const canvas = new OffscreenCanvas(sw, sh);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("No se pudo inicializar el lienzo de recorte.");
+    ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
+    const outBlob = await canvas.convertToBlob({ type: "image/png" });
+    return await blobToDataUrl(outBlob);
+  } finally {
+    bmp.close();
+  }
+}
 
 function allowShortcutCommand(): boolean {
   const now = Date.now();
@@ -934,6 +983,7 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           format: "jpeg",
           quality: 72,
         });
+        lastCapturedScreenDataUrl = dataUrl;
         sendResponse({ ok: true, dataUrl, title: tab.title || "Pantalla" });
       } catch (err) {
         sendResponse({
@@ -968,57 +1018,366 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     return true;
   }
 
-  if (msg.type === "EXECUTE_PAGE_ACTION") {
-    void (async () => {
-      try {
-        if (msg.action.kind === "navigate") {
-          let url = msg.action.url.trim();
-          if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
-          if (!/^https?:\/\//i.test(url)) {
-            sendResponse({ ok: false, error: "URL no permitida." });
-            return;
-          }
-          if (msg.action.newTab) {
-            await chrome.tabs.create({ url, active: true });
-          } else {
-            const tab = await getActiveWebTab();
-            if (tab?.id) await chrome.tabs.update(tab.id, { url });
-            else await chrome.tabs.create({ url, active: true });
-          }
-          sendResponse({ ok: true, detail: `Navegando a ${url}` });
-          return;
-        }
+async function waitForTabReady(tabId: number, maxMs = 4500): Promise<void> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const info = await chrome.tabs.get(tabId).catch(() => null);
+    if (!info) return;
+    if (info.status === "complete") break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  await ensureContentInjected(tabId);
+}
 
-        if (msg.action.kind === "history") {
-          const tab = await getActiveWebTab();
-          if (!tab?.id) {
-            sendResponse({ ok: false, error: "No hay pestaña web activa." });
-            return;
-          }
-          if (msg.action.direction === "back") await chrome.tabs.goBack(tab.id).catch(() => {});
-          else if (msg.action.direction === "forward") await chrome.tabs.goForward(tab.id).catch(() => {});
-          else await chrome.tabs.reload(tab.id).catch(() => {});
-          sendResponse({ ok: true, detail: `Historial: ${msg.action.direction}` });
-          return;
-        }
+function showCropBoxOnTab(
+  tabId: number,
+  xPct: number,
+  yPct: number,
+  wPct: number,
+  hPct: number,
+  label?: string,
+) {
+  void chrome.tabs
+    .sendMessage(
+      tabId,
+      {
+        type: "EXECUTE_PAGE_ACTION",
+        action: { kind: "show_crop_box", xPct, yPct, wPct, hPct, label },
+      } satisfies ExtMessage,
+      { frameId: 0 },
+    )
+    .catch(() => {});
+}
 
+async function executePageActionInSw(action: PageActionPayload): Promise<{ ok: boolean; detail?: string; error?: string }> {
+  try {
+    if (action.kind === "navigate") {
+      let url = action.url.trim();
+      if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+      if (!/^https?:\/\//i.test(url)) {
+        return { ok: false, error: "URL no permitida." };
+      }
+      let targetTabId: number | undefined;
+      if (action.newTab) {
+        const created = await chrome.tabs.create({ url, active: true });
+        targetTabId = created.id;
+      } else {
         const tab = await getActiveWebTab();
-        if (!tab?.id) {
-          sendResponse({ ok: false, error: "No hay pestaña web activa." });
-          return;
+        if (tab?.id) {
+          await chrome.tabs.update(tab.id, { url });
+          targetTabId = tab.id;
+        } else {
+          const created = await chrome.tabs.create({ url, active: true });
+          targetTabId = created.id;
         }
-        await ensureContentInjected(tab.id);
-        const res = await chrome.tabs
-          .sendMessage(tab.id, msg, { frameId: 0 })
-          .catch(() => null);
-        sendResponse(res ?? { ok: false, error: "No se pudo ejecutar la acción en la página." });
-      } catch (err) {
-        sendResponse({
-          ok: false,
-          error: err instanceof Error ? err.message : "Error ejecutando acción en la página.",
+      }
+      if (targetTabId !== undefined) {
+        lastTargetTabId = targetTabId;
+        await waitForTabReady(targetTabId);
+      }
+      return { ok: true, detail: `Navegando a ${url}` };
+    }
+
+    if (action.kind === "history") {
+      const tab = await getActiveWebTab();
+      if (!tab?.id) return { ok: false, error: "No hay pestaña web activa." };
+      if (action.direction === "back") await chrome.tabs.goBack(tab.id).catch(() => {});
+      else if (action.direction === "forward") await chrome.tabs.goForward(tab.id).catch(() => {});
+      else await chrome.tabs.reload(tab.id).catch(() => {});
+      await waitForTabReady(tab.id);
+      return { ok: true, detail: `Historial: ${action.direction}` };
+    }
+
+    const tab = await getActiveWebTab();
+    if (!tab?.id) return { ok: false, error: "No hay pestaña web activa." };
+    await ensureContentInjected(tab.id);
+
+    let outboundAction = action;
+    if (action.kind === "paste_image") {
+      const imgUrl = action.dataUrl || lastCroppedImageDataUrl || lastCapturedScreenDataUrl;
+      if (!imgUrl) {
+        return { ok: false, error: "No hay ninguna imagen capturada o recortada para pegar." };
+      }
+      outboundAction = { ...action, dataUrl: imgUrl };
+    }
+
+    const msgOut: ExtMessage = { type: "EXECUTE_PAGE_ACTION", action: outboundAction };
+    let res = (await chrome.tabs.sendMessage(tab.id, msgOut, { frameId: 0 }).catch(() => null)) as
+      | { ok?: boolean; detail?: string; error?: string }
+      | null;
+
+    // One automatic retry for paste/type/click right after a tab switch or SPA mount
+    if (!res?.ok && (outboundAction.kind === "paste_image" || outboundAction.kind === "type" || outboundAction.kind === "click")) {
+      await new Promise((r) => setTimeout(r, 320));
+      await ensureContentInjected(tab.id);
+      res = (await chrome.tabs.sendMessage(tab.id, msgOut, { frameId: 0 }).catch(() => null)) as
+        | { ok?: boolean; detail?: string; error?: string }
+        | null;
+    }
+
+    return res?.ok
+      ? { ok: true, detail: res.detail }
+      : { ok: false, error: res?.error || "No se pudo ejecutar la acción en la página." };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Error ejecutando acción en la página.",
+    };
+  }
+}
+
+async function executeBrowserActionInSw(act: BrowserActionPayload): Promise<{ ok: boolean; detail?: string; error?: string }> {
+  const norm = (s: string) =>
+    s
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const trigrams = (s: string) => {
+    const padded = `  ${s} `;
+    const set = new Set<string>();
+    for (let i = 0; i <= padded.length - 3; i += 1) set.add(padded.slice(i, i + 3));
+    return set;
+  };
+
+  const diceScore = (a: string, b: string) => {
+    const ta = trigrams(a);
+    const tb = trigrams(b);
+    if (ta.size === 0 || tb.size === 0) return 0;
+    let hit = 0;
+    for (const g of ta) if (tb.has(g)) hit += 1;
+    return (2 * hit) / (ta.size + tb.size);
+  };
+
+  const findTab = async (target?: string): Promise<chrome.tabs.Tab | null> => {
+    const all = (await chrome.tabs.query({ windowType: "normal" }).catch(() => [])).filter(
+      (t) => t.id && t.url && !t.url.startsWith("chrome-extension://"),
+    );
+    const q = (target ?? "").trim();
+    if (!q || /^(current|actual|esta|activa)$/i.test(q)) {
+      return (await getActiveWebTab()) ?? all.find((t) => t.active) ?? null;
+    }
+    const idMatch = q.match(/^(?:tab)?#?(\d+)$/i);
+    if (idMatch) {
+      const byId = all.find((t) => t.id === Number(idMatch[1]));
+      if (byId) return byId;
+    }
+    const needle = norm(q);
+    const direct = all.find(
+      (t) => norm(t.title || "").includes(needle) || norm(t.url || "").includes(needle),
+    );
+    if (direct) return direct;
+
+    let best: { tab: chrome.tabs.Tab; score: number } | null = null;
+    for (const t of all) {
+      const hay = `${norm(t.title || "")} ${norm(t.url || "")}`;
+      const tokens = hay.split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+      let score = diceScore(needle, norm(t.title || ""));
+      for (const tok of tokens) {
+        score = Math.max(score, diceScore(needle, tok));
+      }
+      if (score >= 0.34 && (!best || score > best.score)) {
+        best = { tab: t, score };
+      }
+    }
+    return best?.tab ?? null;
+  };
+
+  try {
+    if (act.kind === "switch_tab") {
+      const tab = await findTab(act.target);
+      if (!tab?.id) return { ok: false, error: `No encontré la pestaña "${act.target}".` };
+      if (tab.windowId !== undefined) {
+        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+      }
+      await chrome.tabs.update(tab.id, { active: true });
+      lastTargetTabId = tab.id;
+      await waitForTabReady(tab.id, 2500);
+      return { ok: true, detail: `Cambiado a "${tab.title}"` };
+    }
+
+    if (act.kind === "close_tab") {
+      const tab = await findTab(act.target);
+      if (!tab?.id) return { ok: false, error: "No encontré la pestaña para cerrar." };
+      await chrome.tabs.remove(tab.id);
+      return { ok: true, detail: `Pestaña cerrada: "${tab.title}"` };
+    }
+
+    if (act.kind === "new_tab") {
+      const raw = (act.urlOrQuery ?? "").trim();
+      let created: chrome.tabs.Tab;
+      if (!raw) {
+        created = await chrome.tabs.create({ active: true });
+      } else if (/^(https?:\/\/|[\w-]+\.[a-z]{2,}(\/|$))/i.test(raw) && !raw.includes(" ")) {
+        const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+        created = await chrome.tabs.create({ url, active: true });
+      } else {
+        created = await chrome.tabs.create({
+          url: `https://www.google.com/search?q=${encodeURIComponent(raw)}`,
+          active: true,
         });
       }
-    })();
+      if (created.id !== undefined) {
+        lastTargetTabId = created.id;
+        await waitForTabReady(created.id);
+      }
+      return { ok: true, detail: "Nueva pestaña abierta" };
+    }
+
+    if (act.kind === "duplicate_tab") {
+      const tab = await getActiveWebTab();
+      if (tab?.id) {
+        const dup = await chrome.tabs.duplicate(tab.id);
+        if (dup?.id !== undefined) lastTargetTabId = dup.id;
+      }
+      return { ok: true, detail: "Pestaña duplicada" };
+    }
+
+    if (act.kind === "pin_tab") {
+      const tab = await getActiveWebTab();
+      if (tab?.id) await chrome.tabs.update(tab.id, { pinned: !tab.pinned });
+      return { ok: true, detail: "Fijado de pestaña alternado" };
+    }
+
+    if (act.kind === "mute_tab") {
+      const tab = await findTab(act.target);
+      if (tab?.id) {
+        await chrome.tabs.update(tab.id, { muted: !tab.mutedInfo?.muted });
+      }
+      return { ok: true, detail: "Audio de pestaña alternado" };
+    }
+
+    if (act.kind === "search_web") {
+      const url = `https://www.google.com/search?q=${encodeURIComponent(act.query)}`;
+      const created = await chrome.tabs.create({ url, active: true });
+      if (created.id !== undefined) {
+        lastTargetTabId = created.id;
+        await waitForTabReady(created.id);
+      }
+      return { ok: true, detail: `Buscando "${act.query}"` };
+    }
+
+    if (act.kind === "bookmark_current") {
+      const tab = await getActiveWebTab();
+      if (tab?.url && chrome.bookmarks?.create) {
+        await chrome.bookmarks.create({ title: tab.title || tab.url, url: tab.url });
+        return { ok: true, detail: "Guardado en marcadores" };
+      }
+      return { ok: false, error: "No se pudo guardar marcador." };
+    }
+
+    if (act.kind === "crop_element") {
+      const tab = await getActiveWebTab();
+      if (!tab?.id || !tab.windowId) return { ok: false, error: "No hay pestaña web activa para recortar." };
+      await ensureContentInjected(tab.id);
+      const rectRes = (await chrome.tabs
+        .sendMessage(
+          tab.id,
+          { type: "EXECUTE_PAGE_ACTION", action: { kind: "get_rect", target: act.target } } satisfies ExtMessage,
+          { frameId: 0 },
+        )
+        .catch(() => null)) as { ok?: boolean; rect?: { xPct: number; yPct: number; wPct: number; hPct: number }; error?: string } | null;
+
+      if (!rectRes?.ok || !rectRes.rect) {
+        return { ok: false, error: rectRes?.error || `No encontré "${act.target}" para recortar.` };
+      }
+
+      const fullPng = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      lastCapturedScreenDataUrl = fullPng;
+      const cropped = await cropDataUrlRegion(
+        fullPng,
+        rectRes.rect.xPct,
+        rectRes.rect.yPct,
+        rectRes.rect.wPct,
+        rectRes.rect.hPct,
+      );
+      lastCroppedImageDataUrl = cropped;
+      showCropBoxOnTab(
+        tab.id,
+        rectRes.rect.xPct,
+        rectRes.rect.yPct,
+        rectRes.rect.wPct,
+        rectRes.rect.hPct,
+        "CAPTURADO",
+      );
+      return { ok: true, detail: `Elemento "${act.target}" recortado con precisión` };
+    }
+
+    if (act.kind === "crop_image") {
+      const tab = await getActiveWebTab();
+      let sourceUrl = act.captureFresh ? null : lastCapturedScreenDataUrl;
+      if (!sourceUrl) {
+        if (!tab?.windowId) return { ok: false, error: "No hay pestaña web activa para recortar." };
+        sourceUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+        lastCapturedScreenDataUrl = sourceUrl;
+      }
+      const cropped = await cropDataUrlRegion(
+        sourceUrl,
+        act.xPct,
+        act.yPct,
+        act.wPct,
+        act.hPct,
+      );
+      lastCroppedImageDataUrl = cropped;
+      if (tab?.id) {
+        showCropBoxOnTab(tab.id, act.xPct, act.yPct, act.wPct, act.hPct, "CAPTURADO");
+      }
+      return { ok: true, detail: "Imagen recortada lista para pegar" };
+    }
+
+    if (act.kind === "open_history") {
+      if (chrome.history?.search) {
+        const items = await chrome.history.search({ text: act.query, maxResults: 5 });
+        const hit = items.find((i) => i.url);
+        if (hit?.url) {
+          const created = await chrome.tabs.create({ url: hit.url, active: true });
+          if (created.id !== undefined) {
+            lastTargetTabId = created.id;
+            await waitForTabReady(created.id);
+          }
+          return { ok: true, detail: `Abierto del historial: ${hit.title || hit.url}` };
+        }
+      }
+      return { ok: false, error: `No encontré "${act.query}" en el historial.` };
+    }
+
+    return { ok: false, error: "Acción de navegador no soportada." };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Error ejecutando acción del navegador.",
+    };
+  }
+}
+
+async function runActionBatchInSw(steps: AgentBatchStep[]) {
+  const results: Array<{ label: string; ok: boolean; detail?: string; error?: string }> = [];
+  for (let i = 0; i < steps.length; i += 1) {
+    const step = steps[i];
+    const res =
+      step.scope === "browser"
+        ? await executeBrowserActionInSw(step.action)
+        : await executePageActionInSw(step.action);
+    results.push({ label: step.label, ...res });
+
+    // Brief settle between chained steps so paste previews, modals, or clicks take effect cleanly
+    if (i < steps.length - 1) {
+      const waitMs =
+        step.scope === "page" && step.action.kind === "paste_image"
+          ? 280
+          : step.scope === "page" && (step.action.kind === "click" || step.action.kind === "click_xy")
+            ? 200
+            : 120;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  return { ok: true, results };
+}
+
+  if (msg.type === "EXECUTE_PAGE_ACTION") {
+    void executePageActionInSw(msg.action).then(sendResponse);
     return true;
   }
 
@@ -1063,174 +1422,12 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
   }
 
   if (msg.type === "EXECUTE_BROWSER_ACTION") {
-    void (async () => {
-      const norm = (s: string) =>
-        s
-          .normalize("NFD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .toLowerCase()
-          .replace(/\s+/g, " ")
-          .trim();
+    void executeBrowserActionInSw(msg.action).then(sendResponse);
+    return true;
+  }
 
-      const trigrams = (s: string) => {
-        const padded = `  ${s} `;
-        const set = new Set<string>();
-        for (let i = 0; i <= padded.length - 3; i += 1) set.add(padded.slice(i, i + 3));
-        return set;
-      };
-
-      const diceScore = (a: string, b: string) => {
-        const ta = trigrams(a);
-        const tb = trigrams(b);
-        if (ta.size === 0 || tb.size === 0) return 0;
-        let hit = 0;
-        for (const g of ta) if (tb.has(g)) hit += 1;
-        return (2 * hit) / (ta.size + tb.size);
-      };
-
-      const findTab = async (target?: string): Promise<chrome.tabs.Tab | null> => {
-        const all = (await chrome.tabs.query({ windowType: "normal" }).catch(() => [])).filter(
-          (t) => t.id && t.url && !t.url.startsWith("chrome-extension://"),
-        );
-        const q = (target ?? "").trim();
-        if (!q || /^(current|actual|esta|activa)$/i.test(q)) {
-          return (await getActiveWebTab()) ?? all.find((t) => t.active) ?? null;
-        }
-        const idMatch = q.match(/^(?:tab)?#?(\d+)$/i);
-        if (idMatch) {
-          const byId = all.find((t) => t.id === Number(idMatch[1]));
-          if (byId) return byId;
-        }
-        const needle = norm(q);
-        const direct = all.find(
-          (t) => norm(t.title || "").includes(needle) || norm(t.url || "").includes(needle),
-        );
-        if (direct) return direct;
-
-        let best: { tab: chrome.tabs.Tab; score: number } | null = null;
-        for (const t of all) {
-          const hay = `${norm(t.title || "")} ${norm(t.url || "")}`;
-          const tokens = hay.split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
-          let score = diceScore(needle, norm(t.title || ""));
-          for (const tok of tokens) {
-            score = Math.max(score, diceScore(needle, tok));
-          }
-          if (score >= 0.34 && (!best || score > best.score)) {
-            best = { tab: t, score };
-          }
-        }
-        return best?.tab ?? null;
-      };
-
-      try {
-        const act = msg.action;
-        if (act.kind === "switch_tab") {
-          const tab = await findTab(act.target);
-          if (!tab?.id) {
-            sendResponse({ ok: false, error: `No encontré la pestaña "${act.target}".` });
-            return;
-          }
-          if (tab.windowId !== undefined) {
-            await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
-          }
-          await chrome.tabs.update(tab.id, { active: true });
-          lastTargetTabId = tab.id;
-          sendResponse({ ok: true, detail: `Cambiado a "${tab.title}"` });
-          return;
-        }
-
-        if (act.kind === "close_tab") {
-          const tab = await findTab(act.target);
-          if (!tab?.id) {
-            sendResponse({ ok: false, error: "No encontré la pestaña para cerrar." });
-            return;
-          }
-          await chrome.tabs.remove(tab.id);
-          sendResponse({ ok: true, detail: `Pestaña cerrada: "${tab.title}"` });
-          return;
-        }
-
-        if (act.kind === "new_tab") {
-          const raw = (act.urlOrQuery ?? "").trim();
-          if (!raw) {
-            await chrome.tabs.create({ active: true });
-          } else if (/^(https?:\/\/|[\w-]+\.[a-z]{2,}(\/|$))/i.test(raw) && !raw.includes(" ")) {
-            const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-            await chrome.tabs.create({ url, active: true });
-          } else {
-            await chrome.tabs.create({
-              url: `https://www.google.com/search?q=${encodeURIComponent(raw)}`,
-              active: true,
-            });
-          }
-          sendResponse({ ok: true, detail: "Nueva pestaña abierta" });
-          return;
-        }
-
-        if (act.kind === "duplicate_tab") {
-          const tab = await getActiveWebTab();
-          if (tab?.id) await chrome.tabs.duplicate(tab.id);
-          sendResponse({ ok: true, detail: "Pestaña duplicada" });
-          return;
-        }
-
-        if (act.kind === "pin_tab") {
-          const tab = await getActiveWebTab();
-          if (tab?.id) await chrome.tabs.update(tab.id, { pinned: !tab.pinned });
-          sendResponse({ ok: true, detail: "Fijado de pestaña alternado" });
-          return;
-        }
-
-        if (act.kind === "mute_tab") {
-          const tab = await findTab(act.target);
-          if (tab?.id) {
-            const nextMuted = !tab.mutedInfo?.muted;
-            await chrome.tabs.update(tab.id, { muted: nextMuted });
-          }
-          sendResponse({ ok: true, detail: "Audio de pestaña alternado" });
-          return;
-        }
-
-        if (act.kind === "search_web") {
-          const url = `https://www.google.com/search?q=${encodeURIComponent(act.query)}`;
-          await chrome.tabs.create({ url, active: true });
-          sendResponse({ ok: true, detail: `Buscando "${act.query}"` });
-          return;
-        }
-
-        if (act.kind === "bookmark_current") {
-          const tab = await getActiveWebTab();
-          if (tab?.url && chrome.bookmarks?.create) {
-            await chrome.bookmarks.create({ title: tab.title || tab.url, url: tab.url });
-            sendResponse({ ok: true, detail: "Guardado en marcadores" });
-          } else {
-            sendResponse({ ok: false, error: "No se pudo guardar marcador." });
-          }
-          return;
-        }
-
-        if (act.kind === "open_history") {
-          if (chrome.history?.search) {
-            const items = await chrome.history.search({ text: act.query, maxResults: 5 });
-            const hit = items.find((i) => i.url);
-            if (hit?.url) {
-              await chrome.tabs.create({ url: hit.url, active: true });
-              sendResponse({ ok: true, detail: `Abierto del historial: ${hit.title || hit.url}` });
-              return;
-            }
-          }
-          sendResponse({ ok: false, error: `No encontré "${act.query}" en el historial.` });
-          return;
-        }
-
-        sendResponse({ ok: false, error: "Acción de navegador no soportada." });
-      } catch (err) {
-        sendResponse({
-          ok: false,
-          error: err instanceof Error ? err.message : "Error ejecutando acción del navegador.",
-        });
-      }
-    })();
+  if (msg.type === "RUN_ACTION_BATCH") {
+    void runActionBatchInSw(msg.steps).then(sendResponse);
     return true;
   }
 

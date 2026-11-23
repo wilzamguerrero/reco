@@ -201,11 +201,15 @@ export type BrowserActionPayload =
   | { kind: "mute_tab"; target?: string }
   | { kind: "search_web"; query: string }
   | { kind: "bookmark_current" }
-  | { kind: "open_history"; query: string };
+  | { kind: "open_history"; query: string }
+  | { kind: "crop_element"; target: string }
+  | { kind: "crop_image"; xPct: number; yPct: number; wPct: number; hPct: number; captureFresh?: boolean };
 
 export type PageActionPayload =
   | { kind: "click"; target: string }
   | { kind: "click_xy"; xPct: number; yPct: number }
+  | { kind: "get_rect"; target: string }
+  | { kind: "show_crop_box"; xPct: number; yPct: number; wPct: number; hPct: number; label?: string }
   | { kind: "type"; target: string; text: string; clear?: boolean }
   | { kind: "press"; key: string }
   | { kind: "scroll"; direction: "up" | "down" | "top" | "bottom" }
@@ -214,9 +218,14 @@ export type PageActionPayload =
   | { kind: "clear_highlights" }
   | { kind: "find_text"; query: string }
   | { kind: "select_text"; query: string; all?: boolean }
+  | { kind: "paste_image"; target?: string; dataUrl?: string }
   | { kind: "copy"; text: string }
   | { kind: "history"; direction: "back" | "forward" | "reload" }
   | { kind: "navigate"; url: string; newTab?: boolean };
+
+export type AgentBatchStep =
+  | { scope: "page"; action: PageActionPayload; label: string }
+  | { scope: "browser"; action: BrowserActionPayload; label: string };
 
 /** Mensajes intercambiados entre Service Worker, Offscreen, Bridge, Content y UI. */
 export type ExtMessage =
@@ -276,6 +285,7 @@ export type ExtMessage =
   | { type: "EXECUTE_PAGE_ACTION"; action: PageActionPayload }
   | { type: "GET_BROWSER_TABS" }
   | { type: "EXECUTE_BROWSER_ACTION"; action: BrowserActionPayload }
+  | { type: "RUN_ACTION_BATCH"; steps: AgentBatchStep[] }
   | { type: "OPEN_FLOATING_CHAT"; autoVoice?: boolean }
   | { type: "AI_VOICE_TOGGLE"; targetTabId?: number }
   | { type: "AI_VOICE_START"; targetTabId?: number }

@@ -21,6 +21,7 @@ export interface PageSnapshotResult {
 export interface PageActionResult {
   ok: boolean;
   detail?: string;
+  rect?: { xPct: number; yPct: number; wPct: number; hPct: number };
   error?: string;
 }
 
@@ -756,6 +757,68 @@ export async function performPageAction(action: PageActionPayload): Promise<Page
       return { ok: true, detail: `Clic en "${getElementLabel(el) || action.target}"` };
     }
 
+    if (action.kind === "show_crop_box") {
+      const x = Math.round((Math.max(0, Math.min(99, action.xPct)) / 100) * window.innerWidth);
+      const y = Math.round((Math.max(0, Math.min(99, action.yPct)) / 100) * window.innerHeight);
+      const w = Math.max(16, Math.round((Math.max(2, Math.min(100 - action.xPct, action.wPct)) / 100) * window.innerWidth));
+      const h = Math.max(16, Math.round((Math.max(2, Math.min(100 - action.yPct, action.hPct)) / 100) * window.innerHeight));
+
+      const box = document.createElement("div");
+      box.style.position = "fixed";
+      box.style.left = `${x}px`;
+      box.style.top = `${y}px`;
+      box.style.width = `${w}px`;
+      box.style.height = `${h}px`;
+      box.style.zIndex = "2147483644";
+      box.style.pointerEvents = "none";
+      box.style.border = "2.5px dashed #2ee6c5";
+      box.style.borderRadius = "4px";
+      box.style.background = "rgba(46, 230, 197, 0.14)";
+      box.style.boxShadow = "0 0 0 2px #09090b, 0 0 22px rgba(46, 230, 197, 0.5)";
+      box.style.transition = "opacity 320ms ease";
+
+      const tag = document.createElement("div");
+      tag.textContent = action.label?.trim() ? `✂ ${action.label}` : "✂ CAPTURADO";
+      tag.style.position = "absolute";
+      tag.style.top = y > 30 ? "-25px" : "4px";
+      tag.style.left = "0px";
+      tag.style.padding = "2px 7px";
+      tag.style.background = "#09090b";
+      tag.style.color = "#2ee6c5";
+      tag.style.border = "1.5px solid #2ee6c5";
+      tag.style.borderRadius = "3px";
+      tag.style.fontFamily = 'ui-monospace, "Cascadia Code", Consolas, monospace';
+      tag.style.fontSize = "10.5px";
+      tag.style.fontWeight = "800";
+      tag.style.letterSpacing = "0.06em";
+      tag.style.whiteSpace = "nowrap";
+      tag.style.boxShadow = "2px 2px 0 #000";
+      box.appendChild(tag);
+
+      document.documentElement.appendChild(box);
+      window.setTimeout(() => {
+        box.style.opacity = "0";
+      }, 1500);
+      window.setTimeout(() => {
+        box.remove();
+      }, 1850);
+      return { ok: true, detail: "Área de recorte mostrada" };
+    }
+
+    if (action.kind === "get_rect") {
+      const el = findElementByTarget(action.target, false);
+      if (!el) return { ok: false, error: `No encontré "${action.target}" para recortar.` };
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      const r = getViewportRect(el);
+      const vw = Math.max(1, window.innerWidth);
+      const vh = Math.max(1, window.innerHeight);
+      const xPct = Math.max(0, (r.left / vw) * 100);
+      const yPct = Math.max(0, (r.top / vh) * 100);
+      const wPct = Math.min(100 - xPct, (r.width / vw) * 100);
+      const hPct = Math.min(100 - yPct, (r.height / vh) * 100);
+      return { ok: true, rect: { xPct, yPct, wPct, hPct }, detail: `Rectángulo de "${getElementLabel(el) || action.target}"` };
+    }
+
     if (action.kind === "click_xy") {
       const x = Math.round((Math.max(0, Math.min(100, action.xPct)) / 100) * window.innerWidth);
       const y = Math.round((Math.max(0, Math.min(100, action.yPct)) / 100) * window.innerHeight);
@@ -983,6 +1046,81 @@ function selectTextAcrossPage(query: string, all = false): boolean {
       const ok = selectTextAcrossPage(action.query, Boolean(action.all));
       if (!ok) return { ok: false, error: `No encontré "${action.query}" para seleccionar.` };
       return { ok: true, detail: action.all ? "Todo seleccionado" : `Seleccionado: "${action.query}"` };
+    }
+
+    if (action.kind === "paste_image") {
+      if (!action.dataUrl) {
+        return { ok: false, error: "No hay imagen para pegar." };
+      }
+      const res = await fetch(action.dataUrl);
+      const blob = await res.blob();
+      const file = new File([blob], `reco-image-${Date.now()}.png`, { type: "image/png" });
+
+      // Best-effort copy to real OS clipboard so user also has it ready for manual Ctrl+V if needed
+      try {
+        if (navigator.clipboard && "write" in navigator.clipboard && typeof ClipboardItem !== "undefined") {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        }
+      } catch {
+        // ignore if page isn't focused for clipboard write
+      }
+
+      const targetEl =
+        (action.target ? findElementByTarget(action.target, true) ?? findElementByTarget(action.target, false) : null) ??
+        findElementByTarget("active", true) ??
+        document.body;
+
+      if (targetEl instanceof HTMLElement) {
+        targetEl.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+        flashElement(targetEl);
+        targetEl.ownerDocument?.defaultView?.focus?.();
+        targetEl.click();
+        targetEl.focus();
+      }
+
+      const dt = new DataTransfer();
+      dt.items.add(file);
+
+      // 1. Primary universal method: synthetic ClipboardEvent("paste") with real File
+      let handled = false;
+      try {
+        const pasteEvt = new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        });
+        targetEl.dispatchEvent(pasteEvt);
+        handled = pasteEvt.defaultPrevented;
+      } catch {
+        handled = false;
+      }
+
+      // 2. Fallback: inject into any <input type="file"> that accepts images (Google AI, ChatGPT, Gmail, etc.)
+      if (!handled) {
+        const fileInputs = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='file']"));
+        const imgInput =
+          fileInputs.find((i) => !i.disabled && /image|\*/i.test(i.accept || "*")) ??
+          fileInputs.find((i) => !i.disabled);
+        if (imgInput) {
+          const dt2 = new DataTransfer();
+          dt2.items.add(file);
+          imgInput.files = dt2.files;
+          imgInput.dispatchEvent(new Event("input", { bubbles: true }));
+          imgInput.dispatchEvent(new Event("change", { bubbles: true }));
+          handled = true;
+        }
+      }
+
+      // 3. Fallback: synthetic DragEvent("drop") on target
+      if (!handled) {
+        const dt3 = new DataTransfer();
+        dt3.items.add(file);
+        targetEl.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: dt3 }));
+        targetEl.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt3 }));
+        targetEl.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt3 }));
+      }
+
+      return { ok: true, detail: "Imagen pegada/adjuntada en la página" };
     }
 
     if (action.kind === "copy") {
