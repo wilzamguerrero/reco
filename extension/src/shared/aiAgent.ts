@@ -16,7 +16,7 @@ import {
   type FreePiChatMessage,
   type FreePiModel,
 } from "./freepiClient";
-import { getChatMessages, getConfig, patchConfig, saveChatMessages } from "./storage";
+import { clearChatMessages, getChatMessages, getConfig, patchConfig, saveChatMessages } from "./storage";
 import type {
   AiProviderId,
   AppConfig,
@@ -82,7 +82,8 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:SET_SPEECH_ENGINE|chrome]] o wispr o wispr_web o whisper_tiny o whisper_base -> cambiar motor de dictado (wispr_web es la demo gratuita sin clave)\n" +
     "- [[ACTION:SET_TTS|supertonic]] o pocket o pocket-web o piper o kokoro o moss o system o off -> cambiar voz de respuesta\n" +
     "- [[ACTION:SET_AI_MODEL|<id_modelo>]] -> cambiar modelo de IA\n" +
-    "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante\n" +
+    "- [[ACTION:NEW_CHAT]] -> limpiar el historial y empezar una conversación nueva con contexto vacío (úsalo cuando pidan nuevo chat, nueva conversación, borrar contexto o empezar de cero; NO abras la ventana de chat ni el panel al hacer esto)\n" +
+    "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante (solo si piden explícitamente ver o abrir la ventana; NO la uses para crear un nuevo chat)\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
     "SÍ tienes visión: cuando el usuario te pregunta si puedes ver lo que hace, su pantalla o lo que dibuja en la pizarra, el sistema adjunta automáticamente una captura real de su pantalla (incluidos sus dibujos). Descríbela directamente y ayúdalo con naturalidad."
   );
@@ -118,6 +119,9 @@ export async function executeActionTags(raw: string): Promise<string[]> {
     } else if (cmd === "START_DICTATION") {
       await chrome.runtime.sendMessage({ type: "DICTATION_START" } satisfies ExtMessage).catch(() => {});
       executed.push("dictado activado");
+    } else if (cmd === "NEW_CHAT" || cmd === "CLEAR_CHAT" || cmd === "RESET_CHAT") {
+      await clearChatMessages();
+      executed.push("nuevo chat");
     } else if (cmd === "OPEN_CHAT") {
       await chrome.runtime.sendMessage({ type: "OPEN_FLOATING_CHAT", autoVoice: false } satisfies ExtMessage).catch(() => {});
       executed.push("chat abierto");
@@ -267,11 +271,13 @@ export async function runRecoAgentTurn(opts: {
   opts.signal?.throwIfAborted();
   const actions = await executeActionTags(finalRaw);
 
-  const updated = workingHistory.map((m) =>
-    m.id === assistantId ? { ...m, text: cleanText, reasoning: result.reasoning || reasoningText } : m,
-  );
-  opts.signal?.throwIfAborted();
-  await saveChatMessages(updated);
+  if (!actions.includes("nuevo chat")) {
+    const updated = workingHistory.map((m) =>
+      m.id === assistantId ? { ...m, text: cleanText, reasoning: result.reasoning || reasoningText } : m,
+    );
+    opts.signal?.throwIfAborted();
+    await saveChatMessages(updated);
+  }
 
   return { text: cleanText, reasoning: result.reasoning || reasoningText, actions };
 }
