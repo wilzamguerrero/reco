@@ -1,14 +1,15 @@
 /**
- * Cliente directo de free-pi (`https://api.freepi.ai`) para la extensión RECO.
- *
- * Basado en la implementación de `inre`:
- *  - Login por dispositivo de GitHub (`/auth/github/device` -> `/auth/consent` -> `/auth/token`).
- *  - Ciclo silencioso de anuncios en segundo plano (`/ads/next?slot=banner` -> píxel gravity -> `/ads/impression`)
- *    sin mostrar banners ni tarjetas publicitarias en la interfaz.
- *  - Catálogo de modelos desde `/client-version` (con soporte de visión `vision`).
- *  - Streaming SSE en `/v1/chat/completions` con `x-session-id` (UUIDv5 estable),
- *    `x-client-version`, reintento en `403 ads_required` y `409 concurrent_session`.
+ * Cliente IA multi-proveedor directo para RECO (basado en `inre`):
+ *  - free-pi (GitHub Device Login + anuncios silenciosos en segundo plano, gratis)
+ *  - OpenRouter (API key, catálogo público y modelos gratuitos)
+ *  - OpenAI (API key)
+ *  - Anthropic (API key, formato /v1/messages)
+ *  - GitHub Models / Copilot (token GitHub)
+ *  - NVIDIA NIM (API key)
+ *  - Personalizado (Ollama / Groq / LM Studio / cualquier API OpenAI-compatible)
  */
+
+import type { AiProviderId } from "./types";
 
 const FREEPI_ROOT = "https://api.freepi.ai";
 const DEFAULT_CLIENT_VERSION = "0.6.21";
@@ -16,6 +17,25 @@ const CONSENT_VERSION = "4";
 const VERSION_TTL_MS = 30 * 60_000;
 const AD_TTL_MS = 240_000;
 const GRAVITY_HOSTS = ["trygravity.ai", "trygravity.com"];
+
+export interface ProviderMeta {
+  id: AiProviderId;
+  label: string;
+  auth: "device" | "key";
+  defaultModel: string;
+  keyUrl?: string;
+  placeholder?: string;
+}
+
+export const AI_PROVIDERS: readonly ProviderMeta[] = [
+  { id: "freepi", label: "free-pi (Gratis)", auth: "device", defaultModel: "deepseek-v4.1-flash", keyUrl: "https://freepi.ai" },
+  { id: "openrouter", label: "OpenRouter", auth: "key", defaultModel: "openai/gpt-4o-mini", keyUrl: "https://openrouter.ai/keys", placeholder: "sk-or-v1-..." },
+  { id: "openai", label: "OpenAI", auth: "key", defaultModel: "gpt-4o-mini", keyUrl: "https://platform.openai.com/api-keys", placeholder: "sk-..." },
+  { id: "anthropic", label: "Anthropic", auth: "key", defaultModel: "claude-sonnet-4-5", keyUrl: "https://console.anthropic.com/settings/keys", placeholder: "sk-ant-..." },
+  { id: "github", label: "GitHub Models", auth: "key", defaultModel: "gpt-4o-mini", keyUrl: "https://github.com/settings/tokens", placeholder: "ghp_... o github_pat_..." },
+  { id: "nvidia", label: "NVIDIA", auth: "key", defaultModel: "nvidia/llama-3.3-nemotron-super-49b-v1", keyUrl: "https://build.nvidia.com", placeholder: "nvapi-..." },
+  { id: "custom", label: "Custom / Ollama", auth: "key", defaultModel: "llama3.2", placeholder: "API key (opcional en Ollama)" },
+];
 
 export interface FreePiDeviceStart {
   sessionId: string;
@@ -116,9 +136,7 @@ async function sessionIdFor(token: string): Promise<string> {
 }
 
 async function ensureClientVersion(token: string, force = false): Promise<string> {
-  if (!force && versionKnown && Date.now() - versionAt < VERSION_TTL_MS) {
-    return clientVersion;
-  }
+  if (!force && versionKnown && Date.now() - versionAt < VERSION_TTL_MS) return clientVersion;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   if (clientVersion) headers["x-client-version"] = clientVersion;
@@ -139,7 +157,7 @@ async function ensureClientVersion(token: string, force = false): Promise<string
   return clientVersion;
 }
 
-async function baseHeaders(token: string): Promise<Record<string, string>> {
+async function freepiHeaders(token: string): Promise<Record<string, string>> {
   await ensureClientVersion(token);
   return {
     Authorization: `Bearer ${token}`,
@@ -219,9 +237,7 @@ export async function waitForFreePiToken(
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     const token = str(data.token);
-    if (token) {
-      return { token, days: daysLeft(token) };
-    }
+    if (token) return { token, days: daysLeft(token) };
     if (res.status === 410 || str(data.message) === "expired_token") {
       throw new Error("El código caducó. Intenta conectar de nuevo.");
     }
@@ -283,7 +299,7 @@ export async function ensureFreePiAd(token: string, force = false): Promise<bool
   if (force || !entry.ad || now - entry.at >= AD_TTL_MS) {
     try {
       const res = await fetch(`${FREEPI_ROOT}/ads/next?slot=banner`, {
-        headers: await baseHeaders(token),
+        headers: await freepiHeaders(token),
       });
       if (res.ok && res.status !== 204) {
         const data = (await res.json()) as Record<string, unknown>;
@@ -323,7 +339,7 @@ export async function ensureFreePiAd(token: string, force = false): Promise<bool
     if (impFired) body.imp_fired = true;
     const res = await fetch(`${FREEPI_ROOT}/ads/impression`, {
       method: "POST",
-      headers: { ...(await baseHeaders(token)), "Content-Type": "application/json" },
+      headers: { ...(await freepiHeaders(token)), "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
     if (!res.ok) return false;
@@ -334,85 +350,246 @@ export async function ensureFreePiAd(token: string, force = false): Promise<bool
   }
 }
 
-/* -------------------------------------------------------- CATALOG & STREAM */
+/* --------------------------------------------------- MULTI-PROVIDER MODELS */
 
-export async function fetchFreePiModels(token: string): Promise<FreePiModel[]> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (clientVersion) headers["x-client-version"] = clientVersion;
-
-  const res = await fetch(`${FREEPI_ROOT}/client-version`, { headers });
-  if (!res.ok) return [];
-  const payload = (await res.json()) as Record<string, unknown>;
-  const wanted = str(payload.latest) || str(payload.min);
-  if (wanted && comparesLower(clientVersion, wanted)) {
-    clientVersion = wanted;
-    versionKnown = true;
-    versionAt = Date.now();
-  }
-
-  const raw = Array.isArray(payload.models) ? payload.models : [];
-  return raw
-    .map((entry): FreePiModel => {
-      if (typeof entry === "string") {
-        return { id: entry, name: entry, free: true, vision: false };
-      }
-      const m = (typeof entry === "object" && entry !== null ? entry : {}) as Record<
-        string,
-        unknown
-      >;
-      const id = str(m.id);
-      const name = str(m.name) || id;
-      const input = Array.isArray(m.input) ? m.input : [];
-      return {
-        id,
-        name,
-        free: m.free === true || m.usage === 0,
-        vision: input.includes("image") || m.vision === true,
-      };
-    })
-    .filter((m) => m.id !== "");
+function normalizeBase(url: string): string {
+  return url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/(?:chat\/completions|messages)$/i, "")
+    .replace(/\/+$/, "");
 }
 
-export async function streamFreePiChat(opts: {
-  token: string;
+export async function fetchProviderModels(opts: {
+  provider: AiProviderId;
+  key: string;
+  customBaseUrl?: string;
+}): Promise<FreePiModel[]> {
+  const { provider, key, customBaseUrl } = opts;
+
+  if (provider === "freepi") {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (key) headers.Authorization = `Bearer ${key}`;
+    if (clientVersion) headers["x-client-version"] = clientVersion;
+
+    const res = await fetch(`${FREEPI_ROOT}/client-version`, { headers });
+    if (!res.ok) return [];
+    const payload = (await res.json()) as Record<string, unknown>;
+    const wanted = str(payload.latest) || str(payload.min);
+    if (wanted && comparesLower(clientVersion, wanted)) {
+      clientVersion = wanted;
+      versionKnown = true;
+      versionAt = Date.now();
+    }
+    const raw = Array.isArray(payload.models) ? payload.models : [];
+    return raw
+      .map((entry): FreePiModel => {
+        if (typeof entry === "string") return { id: entry, name: entry, free: true, vision: false };
+        const m = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+        const id = str(m.id);
+        const input = Array.isArray(m.input) ? m.input : [];
+        return {
+          id,
+          name: str(m.name) || id,
+          free: m.free === true || m.usage === 0,
+          vision: input.includes("image") || m.vision === true,
+        };
+      })
+      .filter((m) => m.id !== "");
+  }
+
+  let url = "";
+  const headers: Record<string, string> = { Accept: "application/json" };
+
+  if (provider === "openrouter") {
+    url = "https://openrouter.ai/api/v1/models";
+    if (key) headers.Authorization = `Bearer ${key}`;
+  } else if (provider === "openai") {
+    url = "https://api.openai.com/v1/models";
+    if (key) headers.Authorization = `Bearer ${key}`;
+  } else if (provider === "anthropic") {
+    url = "https://api.anthropic.com/v1/models";
+    if (key) headers["x-api-key"] = key;
+    headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-dangerous-direct-browser-access"] = "true";
+  } else if (provider === "github") {
+    url = "https://models.github.ai/inference/v1/models";
+    if (key) headers.Authorization = `Bearer ${key}`;
+  } else if (provider === "nvidia") {
+    url = "https://integrate.api.nvidia.com/v1/models";
+    if (key) headers.Authorization = `Bearer ${key}`;
+  } else if (provider === "custom") {
+    const base = normalizeBase(customBaseUrl || "http://localhost:11434/v1");
+    url = `${base}/models`;
+    if (key) headers.Authorization = `Bearer ${key}`;
+  }
+
+  try {
+    const res = await fetch(url, { headers });
+    if (!res.ok) return [];
+    const payload = (await res.json()) as { data?: unknown[]; models?: unknown[] } | unknown[];
+    const list = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload.data)
+        ? payload.data
+        : Array.isArray(payload.models)
+          ? payload.models
+          : [];
+
+    return list
+      .map((entry): FreePiModel => {
+        const m = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+        const id = str(m.id) || str(m.name);
+        const name = str(m.display_name) || str(m.name) || id;
+        const pricing = (m.pricing && typeof m.pricing === "object" ? m.pricing : {}) as Record<string, unknown>;
+        const isFree =
+          id.endsWith(":free") ||
+          (pricing.prompt === "0" && pricing.completion === "0");
+        const arch = (m.architecture && typeof m.architecture === "object" ? m.architecture : {}) as Record<string, unknown>;
+        const modalities = Array.isArray(arch.input_modalities) ? arch.input_modalities : [];
+        const vision =
+          modalities.includes("image") ||
+          /gpt-4o|claude-3|claude-sonnet|claude-opus|gemini|vision|vl|pixtral/i.test(id);
+        return { id, name, free: isFree, vision };
+      })
+      .filter((m) => m.id !== "")
+      .slice(0, 120);
+  } catch {
+    return [];
+  }
+}
+
+/* --------------------------------------------------- MULTI-PROVIDER STREAM */
+
+function toAnthropicMessages(messages: FreePiChatMessage[]) {
+  let system = "";
+  const out: Array<{ role: "user" | "assistant"; content: unknown }> = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      system += (system ? "\n" : "") + (typeof m.content === "string" ? m.content : "");
+      continue;
+    }
+    if (typeof m.content === "string") {
+      out.push({ role: m.role, content: m.content });
+    } else {
+      const blocks = m.content.map((p) => {
+        if (p.type === "text") return { type: "text", text: p.text };
+        const match = /^data:(image\/[a-z+]+);base64,(.+)$/i.exec(p.image_url.url);
+        if (match) {
+          return {
+            type: "image",
+            source: { type: "base64", media_type: match[1], data: match[2] },
+          };
+        }
+        return { type: "text", text: "[Imagen adjunta]" };
+      });
+      out.push({ role: m.role, content: blocks });
+    }
+  }
+  return { system, messages: out };
+}
+
+export async function streamProviderChat(opts: {
+  provider: AiProviderId;
+  key: string;
+  customBaseUrl?: string;
   model: string;
   messages: FreePiChatMessage[];
   signal?: AbortSignal;
   onDelta?: (chunk: string) => void;
   onReasoning?: (chunk: string) => void;
 }): Promise<{ text: string; reasoning: string }> {
-  const { token, model, messages, signal, onDelta, onReasoning } = opts;
+  const { provider, key, customBaseUrl, model, messages, signal, onDelta, onReasoning } = opts;
 
-  // Keep silent ad cycle active before sending chat
-  await ensureFreePiAd(token, false);
+  if (provider === "freepi") {
+    await ensureFreePiAd(key, false);
+  }
 
-  const send = async () =>
-    fetch(`${FREEPI_ROOT}/v1/chat/completions`, {
-      method: "POST",
-      headers: {
-        ...(await baseHeaders(token)),
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
+  const buildRequest = async (): Promise<{ url: string; init: RequestInit; isAnthropic: boolean }> => {
+    if (provider === "anthropic") {
+      const { system, messages: anthMsgs } = toAnthropicMessages(messages);
+      return {
+        url: "https://api.anthropic.com/v1/messages",
+        isAnthropic: true,
+        init: {
+          method: "POST",
+          headers: {
+            "x-api-key": key,
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true",
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 2048,
+            ...(system ? { system } : {}),
+            messages: anthMsgs,
+            stream: true,
+          }),
+          signal,
+        },
+      };
+    }
+
+    let url = `${FREEPI_ROOT}/v1/chat/completions`;
+    let headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    };
+
+    if (provider === "freepi") {
+      headers = { ...(await freepiHeaders(key)), ...headers };
+    } else if (provider === "openrouter") {
+      url = "https://openrouter.ai/api/v1/chat/completions";
+      headers.Authorization = `Bearer ${key}`;
+      headers["X-Title"] = "RECO";
+    } else if (provider === "openai") {
+      url = "https://api.openai.com/v1/chat/completions";
+      headers.Authorization = `Bearer ${key}`;
+    } else if (provider === "github") {
+      url = "https://models.github.ai/inference/v1/chat/completions";
+      headers.Authorization = `Bearer ${key}`;
+    } else if (provider === "nvidia") {
+      url = "https://integrate.api.nvidia.com/v1/chat/completions";
+      headers.Authorization = `Bearer ${key}`;
+    } else if (provider === "custom") {
+      const base = normalizeBase(customBaseUrl || "http://localhost:11434/v1");
+      url = `${base}/chat/completions`;
+      if (key) headers.Authorization = `Bearer ${key}`;
+    }
+
+    return {
+      url,
+      isAnthropic: false,
+      init: {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model, messages, stream: true }),
+        signal,
       },
-      body: JSON.stringify({ model, messages, stream: true }),
-      signal,
-    });
+    };
+  };
 
-  let res = await send();
+  let req = await buildRequest();
+  let res = await fetch(req.url, req.init);
 
-  if (res.status === 403) {
+  if (provider === "freepi" && res.status === 403) {
     const detail = await res.clone().text().catch(() => "");
     if (/ads_required|ads aren't displaying|ads aren't shown/i.test(detail)) {
-      if (await ensureFreePiAd(token, true)) {
-        res = await send();
+      if (await ensureFreePiAd(key, true)) {
+        req = await buildRequest();
+        res = await fetch(req.url, req.init);
       }
     }
   }
 
-  if (res.status === 409) {
+  if (provider === "freepi" && res.status === 409) {
     await new Promise((r) => setTimeout(r, 1400));
-    if (!signal?.aborted) res = await send();
+    if (!signal?.aborted) {
+      req = await buildRequest();
+      res = await fetch(req.url, req.init);
+    }
   }
 
   if (!res.ok) {
@@ -427,15 +604,22 @@ export async function streamFreePiChat(opts: {
     } catch {
       // keep raw
     }
-    throw new Error(msg.slice(0, 240) || `free-pi HTTP ${res.status}`);
+    throw new Error(msg.slice(0, 240) || `HTTP ${res.status}`);
   }
 
   const contentType = res.headers.get("content-type") ?? "";
   if (!contentType.includes("text/event-stream")) {
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
-    };
-    const msg = data.choices?.[0]?.message;
+    const data = (await res.json()) as Record<string, unknown>;
+    if (req.isAnthropic) {
+      const blocks = Array.isArray(data.content) ? data.content : [];
+      const text = blocks
+        .map((b) => (typeof (b as { text?: unknown })?.text === "string" ? (b as { text: string }).text : ""))
+        .join("");
+      if (text) onDelta?.(text);
+      return { text, reasoning: "" };
+    }
+    const choices = Array.isArray(data.choices) ? data.choices : [];
+    const msg = (choices[0] as { message?: { content?: string; reasoning_content?: string } } | undefined)?.message;
     const text = typeof msg?.content === "string" ? msg.content : "";
     const reasoning = typeof msg?.reasoning_content === "string" ? msg.reasoning_content : "";
     if (reasoning) onReasoning?.(reasoning);
@@ -463,25 +647,35 @@ export async function streamFreePiChat(opts: {
         const payload = line.slice(5).trim();
         if (payload === "[DONE]") return { text: text || reasoning, reasoning };
         try {
-          const parsed = JSON.parse(payload) as {
-            choices?: Array<{
+          const parsed = JSON.parse(payload) as Record<string, unknown>;
+          if (req.isAnthropic) {
+            const delta = parsed.delta as { type?: string; text?: string; thinking?: string } | undefined;
+            if (delta?.type === "text_delta" && typeof delta.text === "string") {
+              text += delta.text;
+              onDelta?.(delta.text);
+            } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+              reasoning += delta.thinking;
+              onReasoning?.(delta.thinking);
+            }
+          } else {
+            const choices = parsed.choices as Array<{
               delta?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown };
-            }>;
-          };
-          const delta = parsed.choices?.[0]?.delta;
-          const r =
-            typeof delta?.reasoning_content === "string"
-              ? delta.reasoning_content
-              : typeof delta?.reasoning === "string"
-                ? delta.reasoning
-                : "";
-          if (r) {
-            reasoning += r;
-            onReasoning?.(r);
-          }
-          if (typeof delta?.content === "string" && delta.content) {
-            text += delta.content;
-            onDelta?.(delta.content);
+            }> | undefined;
+            const delta = choices?.[0]?.delta;
+            const r =
+              typeof delta?.reasoning_content === "string"
+                ? delta.reasoning_content
+                : typeof delta?.reasoning === "string"
+                  ? delta.reasoning
+                  : "";
+            if (r) {
+              reasoning += r;
+              onReasoning?.(r);
+            }
+            if (typeof delta?.content === "string" && delta.content) {
+              text += delta.content;
+              onDelta?.(delta.content);
+            }
           }
         } catch {
           // ignore partial JSON

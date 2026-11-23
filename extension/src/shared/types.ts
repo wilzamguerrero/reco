@@ -70,9 +70,22 @@ export interface DictationNote {
   createdAt: number;
 }
 
+export type AiProviderId =
+  | "freepi"
+  | "openrouter"
+  | "openai"
+  | "anthropic"
+  | "github"
+  | "nvidia"
+  | "custom";
+
 export interface AiAssistantConfig {
+  provider: AiProviderId;
   freepiToken: string;
   freepiHandle: string;
+  keys: Record<string, string>;
+  models: Record<string, string>;
+  customBaseUrl: string;
   model: string;
   ttsMode: "kokoro" | "system" | "off";
   ttsVoice: string;
@@ -196,5 +209,6 @@ export type ExtMessage =
   | { type: "OFFSCREEN_RECORDING_ERROR"; recordingId: string; message: string }
   | { type: "OPEN_PERMISSIONS"; afterAction?: "dictation" | "recording" }
   | { type: "CAPTURE_TAB_SCREEN" }
+  | { type: "OPEN_FLOATING_CHAT"; autoVoice?: boolean }
   | { type: "OPEN_SIDEPANEL" }
   | { type: "PERMISSIONS_GRANTED"; afterAction?: "dictation" | "recording" };

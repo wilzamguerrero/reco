@@ -18,12 +18,14 @@ import type {
 
 export interface ShortcutMap {
   dictate: string;
+  aiVoice: string;
   record: string;
   pause: string;
 }
 
 const INITIAL_SHORTCUTS: ShortcutMap = {
   dictate: "Alt+Shift+D",
+  aiVoice: "Alt+Shift+A",
   record: "Alt+Shift+R",
   pause: "Alt+Shift+P",
 };
@@ -58,6 +60,7 @@ async function readChromeShortcuts(): Promise<ShortcutMap> {
     const find = (name: string) => cmds.find((c) => c.name === name)?.shortcut ?? "";
     return {
       dictate: find("toggle-dictation"),
+      aiVoice: find("toggle-ai-voice"),
       record: find("toggle-recording"),
       pause: find("pause-recording"),
     };

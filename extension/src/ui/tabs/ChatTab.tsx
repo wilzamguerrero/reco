@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AI_PROVIDERS,
   ensureFreePiAd,
-  fetchFreePiModels,
+  fetchProviderModels,
   getFreePiMe,
   startFreePiDevice,
-  streamFreePiChat,
+  streamProviderChat,
   waitForFreePiToken,
   type ChatMessagePart,
   type FreePiAccount,
@@ -12,9 +13,15 @@ import {
   type FreePiDeviceStart,
   type FreePiModel,
 } from "../../shared/freepiClient";
-import { KOKORO_VOICES, speakReply, stopSpeaking } from "../../shared/kokoroTts";
+import {
+  getSystemVoices,
+  KOKORO_VOICES,
+  speakReply,
+  stopSpeaking,
+  type VoiceOption,
+} from "../../shared/kokoroTts";
 import { createSpeechEngine, type SpeechEngineHandle } from "../../shared/speechEngine";
-import type { AppConfig, ExtMessage } from "../../shared/types";
+import type { AiProviderId, AppConfig, ExtMessage } from "../../shared/types";
 import { Icon } from "../components/Icon";
 
 interface ChatAttachment {
@@ -42,23 +49,35 @@ export function ChatTab({
   config,
   updateConfig,
   send,
+  autoStartVoice = false,
 }: {
   config: AppConfig;
   updateConfig: (patch: Partial<AppConfig>) => Promise<AppConfig>;
   send: (msg: ExtMessage) => Promise<unknown>;
+  autoStartVoice?: boolean;
 }) {
   const ai = config.ai;
-  const connected = Boolean(ai.freepiToken);
+  const provider: AiProviderId = ai.provider || "freepi";
+  const providerMeta = AI_PROVIDERS.find((p) => p.id === provider) ?? AI_PROVIDERS[0];
+  const activeKey = provider === "freepi" ? ai.freepiToken : ai.keys?.[provider] ?? "";
+  const activeModel = ai.models?.[provider] || ai.model || providerMeta.defaultModel;
+  const hasCred =
+    provider === "custom" ? Boolean(ai.customBaseUrl?.trim()) : Boolean(activeKey.trim());
 
-  // Device login state
+  const [showConfig, setShowConfig] = useState(!hasCred);
+  const [keyDraft, setKeyDraft] = useState(activeKey);
+  const [baseDraft, setBaseDraft] = useState(ai.customBaseUrl || "http://localhost:11434/v1");
+
+  // Device login state (free-pi)
   const [loginFlow, setLoginFlow] = useState<FreePiDeviceStart | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
   const [loginErr, setLoginErr] = useState("");
   const loginAbortRef = useRef<AbortController | null>(null);
 
-  // Account & models
+  // Account, models & voices
   const [account, setAccount] = useState<FreePiAccount | null>(null);
   const [models, setModels] = useState<FreePiModel[]>([]);
+  const [sysVoices, setSysVoices] = useState<VoiceOption[]>([]);
   const [ttsStatus, setTtsStatus] = useState<string | null>(null);
 
   // Chat state
@@ -73,49 +92,84 @@ export function ChatTab({
   const voiceEngineRef = useRef<SpeechEngineHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const autoStartedRef = useRef(false);
 
-  // Silent free-pi ads keep-alive + account/models load
   useEffect(() => {
-    if (!ai.freepiToken) {
+    setKeyDraft(activeKey);
+    if (!hasCred) setShowConfig(true);
+  }, [provider, activeKey]);
+
+  useEffect(() => {
+    const loadSys = () => setSysVoices(getSystemVoices());
+    loadSys();
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.addEventListener?.("voiceschanged", loadSys);
+      return () => window.speechSynthesis.removeEventListener?.("voiceschanged", loadSys);
+    }
+  }, []);
+
+  // Load models + silent free-pi ads keep-alive
+  useEffect(() => {
+    let cancelled = false;
+    let adTimer: number | null = null;
+
+    if (provider === "freepi" && ai.freepiToken) {
+      void ensureFreePiAd(ai.freepiToken, false);
+      adTimer = window.setInterval(() => {
+        if (document.visibilityState !== "hidden") {
+          void ensureFreePiAd(ai.freepiToken, false);
+        }
+      }, 60_000);
+
+      void getFreePiMe(ai.freepiToken).then((me) => {
+        if (cancelled || !me) return;
+        setAccount(me);
+        if (me.handle && me.handle !== ai.freepiHandle) {
+          void updateConfig({ ai: { ...ai, freepiHandle: me.handle } });
+        }
+      });
+    } else {
       setAccount(null);
-      return;
     }
 
-    let cancelled = false;
-    void ensureFreePiAd(ai.freepiToken, false);
-    const adTimer = window.setInterval(() => {
-      if (document.visibilityState !== "hidden") {
-        void ensureFreePiAd(ai.freepiToken, false);
-      }
-    }, 60_000);
-
-    void getFreePiMe(ai.freepiToken).then((me) => {
-      if (cancelled || !me) return;
-      setAccount(me);
-      if (me.handle && me.handle !== ai.freepiHandle) {
-        void updateConfig({ ai: { ...ai, freepiHandle: me.handle } });
-      }
-    });
-
-    void fetchFreePiModels(ai.freepiToken).then((list) => {
-      if (cancelled || list.length === 0) return;
-      setModels(list);
-      if (!ai.model || !list.some((m) => m.id === ai.model)) {
-        const preferred =
-          list.find((m) => m.vision && m.free) ??
-          list.find((m) => m.free) ??
-          list[0];
-        if (preferred) {
-          void updateConfig({ ai: { ...ai, model: preferred.id } });
+    if (hasCred || provider === "openrouter" || provider === "freepi") {
+      void fetchProviderModels({
+        provider,
+        key: activeKey,
+        customBaseUrl: ai.customBaseUrl,
+      }).then((list) => {
+        if (cancelled) return;
+        setModels(list);
+        if (list.length > 0 && !list.some((m) => m.id === activeModel)) {
+          const preferred =
+            list.find((m) => m.vision && m.free) ?? list.find((m) => m.free) ?? list[0];
+          if (preferred) {
+            void updateConfig({
+              ai: {
+                ...ai,
+                model: preferred.id,
+                models: { ...(ai.models ?? {}), [provider]: preferred.id },
+              },
+            });
+          }
         }
-      }
-    });
+      });
+    } else {
+      setModels([]);
+    }
 
     return () => {
       cancelled = true;
-      window.clearInterval(adTimer);
+      if (adTimer !== null) window.clearInterval(adTimer);
     };
-  }, [ai.freepiToken]);
+  }, [provider, activeKey, ai.customBaseUrl]);
+
+  useEffect(() => {
+    if (autoStartVoice && hasCred && !autoStartedRef.current) {
+      autoStartedRef.current = true;
+      toggleVoiceChat();
+    }
+  }, [autoStartVoice, hasCred]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -150,11 +204,13 @@ export function ChatTab({
       await updateConfig({
         ai: {
           ...ai,
+          provider: "freepi",
           freepiToken: token,
           freepiHandle: me?.handle || "",
         },
       });
       setLoginFlow(null);
+      setShowConfig(false);
       void ensureFreePiAd(token, true);
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
@@ -164,6 +220,21 @@ export function ChatTab({
     } finally {
       setLoginBusy(false);
     }
+  }
+
+  async function handleSaveProviderKey() {
+    const nextKeys = { ...(ai.keys ?? {}) };
+    if (keyDraft.trim()) nextKeys[provider] = keyDraft.trim();
+    else delete nextKeys[provider];
+
+    await updateConfig({
+      ai: {
+        ...ai,
+        keys: nextKeys,
+        customBaseUrl: provider === "custom" ? baseDraft.trim() || "http://localhost:11434/v1" : ai.customBaseUrl,
+      },
+    });
+    setShowConfig(false);
   }
 
   async function handleCaptureScreen() {
@@ -180,7 +251,7 @@ export function ChatTab({
       {
         id: `scr-${Date.now()}`,
         kind: "image",
-        name: res.title ? `Pantalla · ${res.title.slice(0, 18)}` : "Pantalla",
+        name: res.title ? `Pantalla · ${res.title.slice(0, 16)}` : "Pantalla",
         dataUrl: res.dataUrl,
       },
     ]);
@@ -220,7 +291,7 @@ export function ChatTab({
 
   async function handleSend(overrideText?: string) {
     const text = (overrideText ?? input).trim();
-    if ((!text && attachments.length === 0) || streaming || !ai.freepiToken) return;
+    if ((!text && attachments.length === 0) || streaming || !hasCred) return;
 
     const currentAttachments = [...attachments];
     setInput("");
@@ -270,10 +341,11 @@ export function ChatTab({
     chatAbortRef.current = ctrl;
 
     try {
-      const selectedModel = ai.model || models[0]?.id || "gpt-4o-mini";
-      const result = await streamFreePiChat({
-        token: ai.freepiToken,
-        model: selectedModel,
+      const result = await streamProviderChat({
+        provider,
+        key: activeKey,
+        customBaseUrl: ai.customBaseUrl,
+        model: activeModel,
         messages: buildWireMessages(),
         signal: ctrl.signal,
         onDelta(chunk) {
@@ -350,76 +422,36 @@ export function ChatTab({
     });
   }
 
-  if (!connected) {
-    return (
-      <div className="pane pane-scroll" style={{ justifyContent: "center" }}>
-        <div className="pane-col" style={{ gap: 10, padding: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <Icon name="spark" size={18} style={{ color: "var(--mint)" }} />
-            <span className="pane-label" style={{ color: "var(--fg)", fontSize: 12 }}>
-              Chat + Voz con free-pi
-            </span>
-          </div>
-          <span className="pane-hint">
-            Conecta con GitHub en 1 clic para usar modelos gratuitos (visión, documentos y voz
-            natural Kokoro-82M local). El soporte de anuncios corre en segundo plano sin banners.
-          </span>
-
-          {loginFlow ? (
-            <div className="pane-col" style={{ borderColor: "var(--mint)", alignItems: "center" }}>
-              <span className="pane-hint">Código copiado · Pégalo en GitHub:</span>
-              <code
-                style={{
-                  fontFamily: "var(--mono)",
-                  fontSize: 18,
-                  fontWeight: 800,
-                  letterSpacing: "0.14em",
-                  color: "var(--mint)",
-                }}
-              >
-                {loginFlow.userCode}
-              </code>
-              <button
-                type="button"
-                className="btn-xs"
-                onClick={() => {
-                  loginAbortRef.current?.abort();
-                  setLoginFlow(null);
-                  setLoginBusy(false);
-                }}
-              >
-                Cancelar
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              disabled={loginBusy}
-              className="action-primary action-cyan"
-              onClick={() => void handleConnectGitHub()}
-            >
-              <Icon name="spark" size={14} />
-              <span>{loginBusy ? "Conectando…" : "Conectar con GitHub"}</span>
-            </button>
-          )}
-
-          {loginErr && <div className="alert-box">{loginErr}</div>}
-        </div>
-      </div>
-    );
-  }
+  const voiceList = ai.ttsMode === "kokoro" ? KOKORO_VOICES : sysVoices;
 
   return (
     <div className="pane">
-      {/* Compact top bar: model + TTS + account */}
+      {/* Compact top bar: provider/config toggle + model + TTS */}
       <div className="chat-toolbar">
+        <button
+          type="button"
+          className={`btn-xs ${showConfig ? "is-mint-btn" : ""}`}
+          title="Cambiar proveedor o clave API"
+          onClick={() => setShowConfig((v) => !v)}
+        >
+          {providerMeta.label.split(" ")[0]}
+        </button>
+
         <select
           className="chat-select"
-          value={ai.model}
-          onChange={(e) => void updateConfig({ ai: { ...ai, model: e.target.value } })}
-          title="Modelo de free-pi"
+          value={activeModel}
+          onChange={(e) =>
+            void updateConfig({
+              ai: {
+                ...ai,
+                model: e.target.value,
+                models: { ...(ai.models ?? {}), [provider]: e.target.value },
+              },
+            })
+          }
+          title="Modelo activo"
         >
-          {models.length === 0 && <option value={ai.model}>{ai.model || "Cargando modelos…"}</option>}
+          {models.length === 0 && <option value={activeModel}>{activeModel}</option>}
           {models.map((m) => (
             <option key={m.id} value={m.id}>
               {m.vision ? "👁 " : ""}
@@ -431,46 +463,137 @@ export function ChatTab({
         <button
           type="button"
           className={`btn-xs ${ai.ttsMode !== "off" ? "is-mint-btn" : ""}`}
-          title={`Voz de respuesta: ${ai.ttsMode === "kokoro" ? "Kokoro-82M natural" : ai.ttsMode === "system" ? "Voz sistema" : "Silencio"} (clic para cambiar)`}
+          title="Cambiar motor de voz (Kokoro natural / Voz sistema / Silencio)"
           onClick={() => {
             stopSpeaking();
             const next =
               ai.ttsMode === "kokoro" ? "system" : ai.ttsMode === "system" ? "off" : "kokoro";
-            void updateConfig({ ai: { ...ai, ttsMode: next } });
+            const nextVoice =
+              next === "kokoro"
+                ? KOKORO_VOICES[0].id
+                : next === "system"
+                  ? sysVoices[0]?.id ?? ""
+                  : ai.ttsVoice;
+            void updateConfig({ ai: { ...ai, ttsMode: next, ttsVoice: nextVoice } });
           }}
         >
-          <Icon name="audio" size={12} />
+          <Icon name="audio" size={11} />
           <span>{ai.ttsMode === "kokoro" ? "KOKORO" : ai.ttsMode === "system" ? "VOZ" : "OFF"}</span>
         </button>
 
-        {ai.ttsMode === "kokoro" && (
+        {ai.ttsMode !== "off" && voiceList.length > 0 && (
           <select
             className="chat-select"
-            style={{ maxWidth: 82 }}
+            style={{ maxWidth: 88 }}
             value={ai.ttsVoice}
-            onChange={(e) => void updateConfig({ ai: { ...ai, ttsVoice: e.target.value } })}
-            title="Voz Kokoro-82M"
+            onChange={(e) => {
+              stopSpeaking();
+              void updateConfig({ ai: { ...ai, ttsVoice: e.target.value } });
+            }}
+            title="Elegir voz"
           >
-            {KOKORO_VOICES.map((v) => (
+            {voiceList.map((v) => (
               <option key={v.id} value={v.id}>
                 {v.label}
               </option>
             ))}
           </select>
         )}
-
-        <button
-          type="button"
-          className="btn-xs"
-          title={`Conectado: ${account?.handle || ai.freepiHandle || "GitHub"} · Clic para desconectar`}
-          onClick={() => {
-            stopSpeaking();
-            void updateConfig({ ai: { ...ai, freepiToken: "", freepiHandle: "" } });
-          }}
-        >
-          ×
-        </button>
       </div>
+
+      {/* Collapsible Multi-Provider Configuration */}
+      {showConfig && (
+        <div className="pane-col" style={{ borderColor: "var(--mint)", gap: 6 }}>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {AI_PROVIDERS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                className={`chip is-cyan ${provider === p.id ? "is-active" : ""}`}
+                onClick={() => void updateConfig({ ai: { ...ai, provider: p.id } })}
+              >
+                {p.label.split(" ")[0]}
+              </button>
+            ))}
+          </div>
+
+          {provider === "freepi" ? (
+            ai.freepiToken ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                <span className="pane-hint" style={{ color: "var(--mint)" }}>
+                  ✓ Conectado ({account?.handle || ai.freepiHandle || "GitHub"})
+                </span>
+                <button
+                  type="button"
+                  className="btn-xs"
+                  onClick={() =>
+                    void updateConfig({ ai: { ...ai, freepiToken: "", freepiHandle: "" } })
+                  }
+                >
+                  Desconectar
+                </button>
+              </div>
+            ) : loginFlow ? (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span className="pane-hint">Código copiado · Pégalo en GitHub:</span>
+                <code style={{ fontFamily: "var(--mono)", fontSize: 16, fontWeight: 800, color: "var(--mint)" }}>
+                  {loginFlow.userCode}
+                </code>
+                <button
+                  type="button"
+                  className="btn-xs"
+                  onClick={() => {
+                    loginAbortRef.current?.abort();
+                    setLoginFlow(null);
+                    setLoginBusy(false);
+                  }}
+                >
+                  Cancelar
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                disabled={loginBusy}
+                className="action-primary action-cyan"
+                style={{ padding: "8px 10px" }}
+                onClick={() => void handleConnectGitHub()}
+              >
+                <Icon name="spark" size={14} />
+                <span>{loginBusy ? "Conectando…" : "Conectar free-pi con GitHub"}</span>
+              </button>
+            )
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              {provider === "custom" && (
+                <input
+                  placeholder="https://api.groq.com/openai/v1 o http://localhost:11434/v1"
+                  value={baseDraft}
+                  onChange={(e) => setBaseDraft(e.target.value)}
+                />
+              )}
+              <div style={{ display: "flex", gap: 4 }}>
+                <input
+                  type="password"
+                  style={{ flex: 1 }}
+                  placeholder={providerMeta.placeholder || "API Key"}
+                  value={keyDraft}
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                />
+                <button
+                  type="button"
+                  className="btn-xs is-mint-btn"
+                  onClick={() => void handleSaveProviderKey()}
+                >
+                  Guardar
+                </button>
+              </div>
+            </div>
+          )}
+
+          {loginErr && <div className="alert-box">{loginErr}</div>}
+        </div>
+      )}
 
       {ttsStatus && (
         <div className="ok-box" style={{ fontFamily: "var(--mono)", fontSize: 10 }}>
@@ -484,7 +607,11 @@ export function ChatTab({
         {messages.length === 0 ? (
           <div className="chat-empty">
             <Icon name="spark" size={20} style={{ color: "var(--mint)" }} />
-            <span>Habla, escribe, comparte tu pantalla (👁) o adjunta documentos.</span>
+            <span>
+              {hasCred
+                ? "Habla, escribe, comparte tu pantalla (👁) o adjunta documentos."
+                : "Selecciona tu proveedor arriba y conecta para empezar."}
+            </span>
           </div>
         ) : (
           messages.map((m) => (
@@ -588,7 +715,7 @@ export function ChatTab({
         <button
           type="button"
           className={`icon-btn ${voiceListening ? "is-listening-btn" : ""}`}
-          title={voiceListening ? "Detener voz y enviar" : "Hablar con RECO"}
+          title={voiceListening ? "Detener voz y enviar" : "Hablar con RECO IA"}
           onClick={toggleVoiceChat}
         >
           <Icon name={voiceListening ? "stop" : "mic"} size={14} />

@@ -4,16 +4,14 @@ import { Icon, type IconName } from "./components/Icon";
 import { Orb } from "./components/Orb";
 import { useRecoState } from "./hooks/useRecoState";
 import { BibliotecaTab } from "./tabs/BibliotecaTab";
-import { ChatTab } from "./tabs/ChatTab";
 import { DictadoTab } from "./tabs/DictadoTab";
 import { GrabarTab } from "./tabs/GrabarTab";
 import { NotionTab } from "./tabs/NotionTab";
 
-type Tab = "dictado" | "chat" | "grabar" | "biblioteca" | "notion";
+type Tab = "dictado" | "grabar" | "biblioteca" | "notion";
 
 const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "dictado", label: "Dictar", icon: "mic" },
-  { id: "chat", label: "Chat", icon: "spark" },
   { id: "grabar", label: "Grabar", icon: "monitor" },
   { id: "biblioteca", label: "Clips", icon: "grid" },
   { id: "notion", label: "Notion", icon: "notion" },
@@ -135,14 +133,12 @@ export function PanelApp({ isSidePanel = false }: { isSidePanel?: boolean }) {
             config={config}
             history={dictationHistory}
             shortcut={shortcuts.dictate}
+            aiShortcut={shortcuts.aiVoice}
             onDeleteNote={deleteDictationNote}
             onClearHistory={clearHistory}
             updateConfig={updateConfig}
             send={send}
           />
-        )}
-        {tab === "chat" && (
-          <ChatTab config={config} updateConfig={updateConfig} send={send} />
         )}
         {tab === "grabar" && (
           <GrabarTab

@@ -62,8 +62,21 @@
         "mac": "Alt+Shift+P"
       },
       "description": "Pausar o reanudar la grabación actual"
+    },
+    "toggle-ai-voice": {
+      "suggested_key": {
+        "default": "Alt+Shift+A",
+        "mac": "Alt+Shift+A"
+      },
+      "description": "Hablar con RECO IA (chat flotante + voz)"
     }
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["chat.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "permissions": [
     "activeTab",
     "contextMenus",

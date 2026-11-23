@@ -35,6 +35,7 @@ export function DictadoTab({
   config,
   history,
   shortcut,
+  aiShortcut,
   onDeleteNote,
   onClearHistory,
   updateConfig,
@@ -44,6 +45,7 @@ export function DictadoTab({
   config: AppConfig;
   history: DictationNote[];
   shortcut: string;
+  aiShortcut: string;
   onDeleteNote: (id: string) => Promise<void>;
   onClearHistory: () => Promise<void>;
   updateConfig: (patch: Partial<AppConfig>) => Promise<AppConfig>;
@@ -116,15 +118,35 @@ export function DictadoTab({
 
   return (
     <div className="pane pane-scroll">
-      <button
-        type="button"
-        className={`action-primary ${listening ? "action-red" : "action-cyan"}`}
-        onClick={() => void startOrStopDictation()}
-      >
-        <Icon name={listening ? "stop" : "mic"} size={15} />
-        <span>{listening ? "Detener" : "Dictar"}</span>
-        <kbd className="kbd">{shortcut || "Sin atajo"}</kbd>
-      </button>
+      <div className="action-row">
+        <button
+          type="button"
+          className={`action-primary ${listening ? "action-red" : "action-cyan"}`}
+          style={{ padding: "10px 8px", flexDirection: "column", gap: 4 }}
+          title={`Dictado normal en el cursor (${shortcut || "Sin atajo"})`}
+          onClick={() => void startOrStopDictation()}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Icon name={listening ? "stop" : "mic"} size={14} />
+            <span>{listening ? "Detener" : "Dictar"}</span>
+          </span>
+          <kbd className="kbd">{shortcut || "Sin atajo"}</kbd>
+        </button>
+
+        <button
+          type="button"
+          className="action-primary action-violet"
+          style={{ padding: "10px 8px", flexDirection: "column", gap: 4 }}
+          title={`Hablar con RECO IA en ventana flotante (${aiShortcut || "Sin atajo"})`}
+          onClick={() => void send({ type: "OPEN_FLOATING_CHAT", autoVoice: true })}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Icon name="spark" size={14} />
+            <span>Hablar IA</span>
+          </span>
+          <kbd className="kbd">{aiShortcut || "Sin atajo"}</kbd>
+        </button>
+      </div>
 
       <div className="icon-tiles icon-tiles-3">
         <button

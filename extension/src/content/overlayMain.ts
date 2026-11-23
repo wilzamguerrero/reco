@@ -16,7 +16,7 @@ import type { AppConfig, ExtMessage, LiveState } from "../shared/types";
 import { createDrawOverlay } from "./drawOverlay";
 
 const HOST_ID = "reco-ext-host";
-const GUARD_KEY = "__recoOverlayLoaded_v15";
+const GUARD_KEY = "__recoOverlayLoaded_v16";
 const CONTROL_SIZE = 42;
 const TILE_GAP = 8;
 const TILE_STEP = CONTROL_SIZE + TILE_GAP;
@@ -50,6 +50,10 @@ const SVG_PANEL = `<svg width="19" height="19" viewBox="0 0 24 24" fill="current
 
 const SVG_DRAW = `<svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
   <path d="M3 17.5V21h3.5L18.4 9.1l-3.5-3.5L3 17.5ZM21 6.5 17.5 3l-1.8 1.8 3.5 3.5L21 6.5Z"/>
+</svg>`;
+
+const SVG_CHAT = `<svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+  <path d="M3 4h18v13H9l-6 4V4Zm3 4v2.4h12V8H6Zm0 4.4v2.2h8v-2.2H6Z"/>
 </svg>`;
 
 const SVG_PAUSE = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="4" width="5" height="16"/><rect x="14" y="4" width="5" height="16"/></svg>`;
@@ -121,6 +125,158 @@ function runOverlay() {
   let toastEl: HTMLDivElement | null = null;
   let uiTimerInterval: number | null = null;
   let drawOverlayHandle: ReturnType<typeof createDrawOverlay> | null = null;
+  let chatWinHost: HTMLDivElement | null = null;
+
+  function closeFloatingChat() {
+    if (chatWinHost) {
+      chatWinHost.remove();
+      chatWinHost = null;
+    }
+  }
+
+  function openFloatingChat(autoVoice = false) {
+    if (chatWinHost && chatWinHost.isConnected) {
+      if (autoVoice) {
+        const frame = chatWinHost.shadowRoot?.querySelector("iframe");
+        if (frame) frame.src = chrome.runtime.getURL(`chat.html?voice=1&t=${Date.now()}`);
+      }
+      return;
+    }
+    document.querySelectorAll("#reco-chat-host").forEach((el) => el.remove());
+
+    chatWinHost = document.createElement("div");
+    chatWinHost.id = "reco-chat-host";
+    chatWinHost.style.position = "fixed";
+    chatWinHost.style.zIndex = "2147483646";
+    chatWinHost.style.right = "76px";
+    chatWinHost.style.bottom = "22px";
+    chatWinHost.style.width = "356px";
+    chatWinHost.style.height = "476px";
+
+    const sh = chatWinHost.attachShadow({ mode: "open" });
+    const st = document.createElement("style");
+    st.textContent = `
+      :host { all: initial; font-family: ui-monospace, Consolas, monospace; }
+      .win {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        background: #08080a;
+        border: 1.75px solid #eae5d9;
+        border-radius: 4px;
+        box-shadow: 5px 5px 0 #000000;
+        overflow: hidden;
+      }
+      .bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 5px 8px;
+        background: #111114;
+        border-bottom: 1.5px solid #2a2a32;
+        color: #eae5d9;
+        font-size: 10.5px;
+        font-weight: 800;
+        letter-spacing: 0.1em;
+        cursor: grab;
+        user-select: none;
+      }
+      .bar:active { cursor: grabbing; }
+      .bar-left { display: flex; align-items: center; gap: 6px; }
+      .dot { width: 8px; height: 8px; background: #8b6eff; }
+      .close {
+        width: 22px;
+        height: 22px;
+        padding: 0;
+        border: 1.5px solid #2a2a32;
+        border-radius: 2px;
+        background: #1a1a1f;
+        color: #eae5d9;
+        font-family: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        display: grid;
+        place-items: center;
+      }
+      .close:hover { background: #f05a28; border-color: #f05a28; color: #09090b; }
+      iframe {
+        flex: 1;
+        width: 100%;
+        border: none;
+        background: #08080a;
+      }
+    `;
+
+    const winEl = document.createElement("div");
+    winEl.className = "win";
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.innerHTML = `<span class="bar-left"><span class="dot"></span>RECO · CHAT IA</span>`;
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "close";
+    closeBtn.textContent = "×";
+    closeBtn.title = "Cerrar Chat IA";
+    closeBtn.addEventListener("click", () => closeFloatingChat());
+    bar.appendChild(closeBtn);
+
+    // Drag chat window cleanly by its header bar
+    let draggingWin = false;
+    let sx = 0;
+    let sy = 0;
+    let sr = 76;
+    let sb = 22;
+    bar.addEventListener("pointerdown", (e) => {
+      if ((e.target as HTMLElement).closest(".close") || !chatWinHost) return;
+      draggingWin = true;
+      sx = e.clientX;
+      sy = e.clientY;
+      const r = chatWinHost.getBoundingClientRect();
+      sr = window.innerWidth - r.right;
+      sb = window.innerHeight - r.bottom;
+      try {
+        bar.setPointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+    });
+    bar.addEventListener("pointermove", (e) => {
+      if (!draggingWin || !chatWinHost) return;
+      const nr = Math.max(8, Math.min(window.innerWidth - 364, sr - (e.clientX - sx)));
+      const nb = Math.max(8, Math.min(window.innerHeight - 484, sb - (e.clientY - sy)));
+      chatWinHost.style.right = `${Math.round(nr)}px`;
+      chatWinHost.style.bottom = `${Math.round(nb)}px`;
+    });
+    const endWinDrag = (e: PointerEvent) => {
+      draggingWin = false;
+      try {
+        if (bar.hasPointerCapture(e.pointerId)) bar.releasePointerCapture(e.pointerId);
+      } catch {
+        // ignore
+      }
+    };
+    bar.addEventListener("pointerup", endWinDrag);
+    bar.addEventListener("pointercancel", endWinDrag);
+
+    const frame = document.createElement("iframe");
+    frame.allow = "microphone; clipboard-write";
+    frame.src = chrome.runtime.getURL(autoVoice ? "chat.html?voice=1" : "chat.html");
+
+    winEl.append(bar, frame);
+    sh.append(st, winEl);
+    document.documentElement.appendChild(chatWinHost);
+  }
+
+  function toggleFloatingChat(autoVoice = false) {
+    if (chatWinHost && chatWinHost.isConnected) {
+      closeFloatingChat();
+    } else {
+      openFloatingChat(autoVoice);
+    }
+  }
 
   function formatTime(ms: number): string {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -210,7 +366,7 @@ function runOverlay() {
     const spaceLeft = rect.left;
     const spaceRight = window.innerWidth - rect.right;
 
-    const needed = TILE_STEP * 4 + EDGE_MARGIN;
+    const needed = TILE_STEP * 5 + EDGE_MARGIN;
     type Dir = "up" | "down" | "left" | "right";
     let dir: Dir = "up";
 
@@ -382,9 +538,10 @@ function runOverlay() {
         transform: translate(var(--tx, 0px), var(--ty, 0px)) scale(1) rotate(0deg);
       }
       .fab-group.is-open .fab-tile:nth-child(1) { transition-delay: 0ms; }
-      .fab-group.is-open .fab-tile:nth-child(2) { transition-delay: 38ms; }
-      .fab-group.is-open .fab-tile:nth-child(3) { transition-delay: 76ms; }
-      .fab-group.is-open .fab-tile:nth-child(4) { transition-delay: 114ms; }
+      .fab-group.is-open .fab-tile:nth-child(2) { transition-delay: 32ms; }
+      .fab-group.is-open .fab-tile:nth-child(3) { transition-delay: 64ms; }
+      .fab-group.is-open .fab-tile:nth-child(4) { transition-delay: 96ms; }
+      .fab-group.is-open .fab-tile:nth-child(5) { transition-delay: 128ms; }
 
       .fab-tile:hover {
         transform: translate(calc(var(--tx, 0px) - 1px), calc(var(--ty, 0px) - 1px)) scale(1.06) rotate(0deg);
@@ -397,6 +554,7 @@ function runOverlay() {
       }
 
       .fab-dictate { background: #2ee6c5; }
+      .fab-chat { background: #8b6eff; }
       .fab-record { background: #f05a28; }
       .fab-draw { background: #f4b41a; }
       .fab-panel { background: #eae5d9; }
@@ -596,6 +754,18 @@ function runOverlay() {
       drawOverlay.toggle();
     });
 
+    const btnChat = document.createElement("button");
+    btnChat.type = "button";
+    btnChat.className = "fab-tile fab-chat";
+    btnChat.title = "Chat IA con voz, visión y documentos";
+    btnChat.innerHTML = `${SVG_CHAT}<span class="fab-tip">Chat IA</span>`;
+    btnChat.addEventListener("mousedown", (e) => e.preventDefault());
+    btnChat.addEventListener("click", () => {
+      menuOpen = false;
+      renderState();
+      toggleFloatingChat(false);
+    });
+
     const btnPanel = document.createElement("button");
     btnPanel.type = "button";
     btnPanel.className = "fab-tile fab-panel";
@@ -607,8 +777,8 @@ function runOverlay() {
       void chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" } satisfies ExtMessage);
     });
 
-    fabButtons = [btnDictate, btnRecord, btnDraw, btnPanel];
-    fabGroupEl.append(btnDictate, btnRecord, btnDraw, btnPanel);
+    fabButtons = [btnDictate, btnChat, btnRecord, btnDraw, btnPanel];
+    fabGroupEl.append(btnDictate, btnChat, btnRecord, btnDraw, btnPanel);
 
     toastEl = document.createElement("div");
     toastEl.className = "toast";
@@ -938,6 +1108,11 @@ function runOverlay() {
       isStartingDictation = false;
       triggerErrorFlash();
       showToast(msg.message);
+      return;
+    }
+
+    if (msg.type === "OPEN_FLOATING_CHAT") {
+      openFloatingChat(Boolean(msg.autoVoice));
     }
   });
 

@@ -527,6 +527,17 @@ chrome.commands.onCommand.addListener((command) => {
     if (state.recordingPhase === "recording" || state.recordingPhase === "paused") {
       void chrome.runtime.sendMessage({ type: "OFFSCREEN_PAUSE_TOGGLE" } satisfies ExtMessage);
     }
+  } else if (command === "toggle-ai-voice") {
+    void (async () => {
+      const tab = await getActiveWebTab();
+      if (!tab?.id) return;
+      await ensureContentInjected(tab.id);
+      void chrome.tabs
+        .sendMessage(tab.id, { type: "OPEN_FLOATING_CHAT", autoVoice: true } satisfies ExtMessage, {
+          frameId: 0,
+        })
+        .catch(() => {});
+    })();
   }
 });
 
@@ -807,6 +818,22 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
       }
     })();
     return true;
+  }
+
+  if (msg.type === "OPEN_FLOATING_CHAT") {
+    void (async () => {
+      const tab = await getActiveWebTab();
+      if (!tab?.id) return;
+      await ensureContentInjected(tab.id);
+      void chrome.tabs
+        .sendMessage(
+          tab.id,
+          { type: "OPEN_FLOATING_CHAT", autoVoice: Boolean(msg.autoVoice) } satisfies ExtMessage,
+          { frameId: 0 },
+        )
+        .catch(() => {});
+    })();
+    return;
   }
 
   if (msg.type === "RECORDING_RETRY_UPLOAD") {

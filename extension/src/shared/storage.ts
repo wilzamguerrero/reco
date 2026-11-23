@@ -39,11 +39,15 @@ export const DEFAULT_CONFIG: AppConfig = {
     writeMode: "toggle_block",
   },
   ai: {
+    provider: "freepi",
     freepiToken: "",
     freepiHandle: "",
+    keys: {},
+    models: {},
+    customBaseUrl: "http://localhost:11434/v1",
     model: "",
     ttsMode: "kokoro",
-    ttsVoice: "ef_dora",
+    ttsVoice: "af_heart",
   },
   orbPosition: null,
 };

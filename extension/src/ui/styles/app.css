@@ -101,7 +101,7 @@
 /* Brutalist icon-first tab bar */
 .tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 4px;
 }
 
@@ -222,6 +222,18 @@
 .action-red:hover:not(:disabled) {
   background: #ff7344;
   border-color: #ff7344;
+  color: var(--ink);
+}
+
+.action-violet {
+  border-color: var(--violet);
+  background: var(--violet);
+  color: var(--ink);
+}
+
+.action-violet:hover:not(:disabled) {
+  background: #a48dff;
+  border-color: #a48dff;
   color: var(--ink);
 }
 

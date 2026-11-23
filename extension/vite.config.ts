@@ -17,6 +17,7 @@ export default defineConfig({
         offscreen: resolve(__dirname, "offscreen.html"),
         permissions: resolve(__dirname, "permissions.html"),
         bridge: resolve(__dirname, "bridge.html"),
+        chat: resolve(__dirname, "chat.html"),
       },
       output: {
         entryFileNames: "assets/[name].js",
