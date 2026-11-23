@@ -197,6 +197,12 @@ export type PageActionPayload =
   | { kind: "type"; target: string; text: string; clear?: boolean }
   | { kind: "press"; key: string }
   | { kind: "scroll"; direction: "up" | "down" | "top" | "bottom" }
+  | { kind: "scroll_to"; target: string }
+  | { kind: "highlight"; target: string; label?: string }
+  | { kind: "clear_highlights" }
+  | { kind: "find_text"; query: string }
+  | { kind: "copy"; text: string }
+  | { kind: "history"; direction: "back" | "forward" | "reload" }
   | { kind: "navigate"; url: string; newTab?: boolean };
 
 /** Mensajes intercambiados entre Service Worker, Offscreen, Bridge, Content y UI. */

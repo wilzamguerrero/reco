@@ -989,6 +989,19 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           return;
         }
 
+        if (msg.action.kind === "history") {
+          const tab = await getActiveWebTab();
+          if (!tab?.id) {
+            sendResponse({ ok: false, error: "No hay pestaña web activa." });
+            return;
+          }
+          if (msg.action.direction === "back") await chrome.tabs.goBack(tab.id).catch(() => {});
+          else if (msg.action.direction === "forward") await chrome.tabs.goForward(tab.id).catch(() => {});
+          else await chrome.tabs.reload(tab.id).catch(() => {});
+          sendResponse({ ok: true, detail: `Historial: ${msg.action.direction}` });
+          return;
+        }
+
         const tab = await getActiveWebTab();
         if (!tab?.id) {
           sendResponse({ ok: false, error: "No hay pestaña web activa." });

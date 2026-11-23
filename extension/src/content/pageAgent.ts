@@ -25,7 +25,7 @@ export interface PageActionResult {
 }
 
 const IGNORED_HOST_IDS = new Set(["reco-ext-host", "reco-draw-host", "reco-chat-host"]);
-const MAX_ELEMENTS = 75;
+const MAX_ELEMENTS = 90;
 
 const INTERACTIVE_SELECTOR = [
   "a[href]",
@@ -48,9 +48,118 @@ const INTERACTIVE_SELECTOR = [
   "[role='row']",
   "[role='listitem']",
   "summary",
+  "img",
+  "h1",
+  "h2",
+  "h3",
 ].join(",");
 
 const indexedElements = new Map<number, HTMLElement>();
+
+interface ActiveHighlight {
+  el: HTMLElement;
+  box: HTMLDivElement;
+  timer: number;
+}
+
+const activeHighlights: ActiveHighlight[] = [];
+let highlightSyncAttached = false;
+
+function syncHighlightPositions() {
+  for (let i = activeHighlights.length - 1; i >= 0; i -= 1) {
+    const h = activeHighlights[i];
+    if (!h.el.isConnected) {
+      clearTimeout(h.timer);
+      h.box.remove();
+      activeHighlights.splice(i, 1);
+      continue;
+    }
+    const r = h.el.getBoundingClientRect();
+    h.box.style.left = `${Math.round(r.left - 4)}px`;
+    h.box.style.top = `${Math.round(r.top - 4)}px`;
+    h.box.style.width = `${Math.max(12, Math.round(r.width + 8))}px`;
+    h.box.style.height = `${Math.max(12, Math.round(r.height + 8))}px`;
+  }
+}
+
+function ensureHighlightSync() {
+  if (highlightSyncAttached) return;
+  highlightSyncAttached = true;
+  window.addEventListener("scroll", syncHighlightPositions, { passive: true, capture: true });
+  window.addEventListener("resize", syncHighlightPositions, { passive: true });
+}
+
+function clearAllHighlights() {
+  while (activeHighlights.length > 0) {
+    const h = activeHighlights.pop()!;
+    clearTimeout(h.timer);
+    h.box.remove();
+  }
+}
+
+function highlightElement(el: HTMLElement, label?: string) {
+  ensureHighlightSync();
+  el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+
+  // Remove existing highlight on same element to avoid duplicates
+  for (let i = activeHighlights.length - 1; i >= 0; i -= 1) {
+    if (activeHighlights[i].el === el) {
+      clearTimeout(activeHighlights[i].timer);
+      activeHighlights[i].box.remove();
+      activeHighlights.splice(i, 1);
+    }
+  }
+
+  const box = document.createElement("div");
+  box.dataset.recoHighlight = "1";
+  box.style.position = "fixed";
+  box.style.zIndex = "2147483644";
+  box.style.pointerEvents = "none";
+  box.style.border = "3px solid #2ee6c5";
+  box.style.borderRadius = "5px";
+  box.style.background = "rgba(46, 230, 197, 0.10)";
+  box.style.boxShadow = "0 0 0 2px #09090b, 0 0 20px rgba(46, 230, 197, 0.55)";
+  box.style.transition = "opacity 280ms ease";
+
+  const tag = document.createElement("div");
+  tag.textContent = label?.trim() ? `✦ ${cleanSnippet(label, 42)}` : "✦ AQUÍ";
+  tag.style.position = "absolute";
+  tag.style.top = "-26px";
+  tag.style.left = "-3px";
+  tag.style.padding = "3px 8px";
+  tag.style.background = "#09090b";
+  tag.style.color = "#2ee6c5";
+  tag.style.border = "1.5px solid #2ee6c5";
+  tag.style.borderRadius = "3px";
+  tag.style.fontFamily = 'ui-monospace, "Cascadia Code", Consolas, monospace';
+  tag.style.fontSize = "11px";
+  tag.style.fontWeight = "800";
+  tag.style.letterSpacing = "0.05em";
+  tag.style.whiteSpace = "nowrap";
+  tag.style.boxShadow = "2px 2px 0 #000000";
+  box.appendChild(tag);
+
+  document.documentElement.appendChild(box);
+
+  const entry: ActiveHighlight = {
+    el,
+    box,
+    timer: window.setTimeout(() => {
+      box.style.opacity = "0";
+      window.setTimeout(() => {
+        box.remove();
+        const idx = activeHighlights.indexOf(entry);
+        if (idx >= 0) activeHighlights.splice(idx, 1);
+      }, 300);
+    }, 15_000),
+  };
+  activeHighlights.push(entry);
+
+  // Sync now and after smooth scroll settles
+  syncHighlightPositions();
+  window.setTimeout(syncHighlightPositions, 160);
+  window.setTimeout(syncHighlightPositions, 420);
+}
 
 function normalizeText(s: string): string {
   return s
@@ -151,6 +260,26 @@ function getElementLabel(el: HTMLElement): string {
   const inner = cleanSnippet(el.innerText || el.textContent);
   if (inner) return inner;
 
+  if (el instanceof HTMLImageElement) {
+    if (el.alt?.trim()) return cleanSnippet(el.alt);
+    const fig = el.closest("figure")?.querySelector("figcaption")?.textContent;
+    if (fig?.trim()) return cleanSnippet(fig);
+    const parentLink = el.closest("a");
+    if (parentLink) {
+      const pLabel =
+        parentLink.getAttribute("aria-label") ||
+        parentLink.getAttribute("title") ||
+        cleanSnippet(parentLink.innerText);
+      if (pLabel?.trim()) return cleanSnippet(pLabel);
+    }
+    try {
+      const fname = decodeURIComponent(new URL(el.src).pathname.split("/").pop() || "");
+      if (fname) return cleanSnippet(fname, 48);
+    } catch {
+      // ignore
+    }
+  }
+
   const alt = el.querySelector("img[alt]")?.getAttribute("alt");
   if (alt?.trim()) return cleanSnippet(alt);
 
@@ -160,6 +289,8 @@ function getElementLabel(el: HTMLElement): string {
 function getElementKind(el: HTMLElement): string {
   const tag = el.tagName.toLowerCase();
   const role = el.getAttribute("role");
+  if (tag === "img") return "img";
+  if (tag === "h1" || tag === "h2" || tag === "h3") return "heading";
   if (tag === "input") {
     const type = (el as HTMLInputElement).type || "text";
     return `input(${type})`;
@@ -246,6 +377,12 @@ export function capturePageSnapshot(): PageSnapshotResult {
 
       if (!isVisibleInViewport(el)) continue;
 
+      // Ignore tiny decorative icons/avatars for <img>
+      if (el instanceof HTMLImageElement) {
+        const r = el.getBoundingClientRect();
+        if (r.width < 48 || r.height < 48) continue;
+      }
+
       const label = getElementLabel(el);
       const editable = isEditableElement(el);
       if (!label && !editable) continue;
@@ -269,8 +406,8 @@ export function capturePageSnapshot(): PageSnapshotResult {
     const header = `[Página activa: "${cleanSnippet(document.title, 80)}" (${location.href})]`;
     const body =
       lines.length > 0
-        ? `Elementos interactivos visibles (usa el #id con PAGE_CLICK o PAGE_TYPE):\n${lines.join("\n")}`
-        : "No se detectaron elementos interactivos visibles en esta vista.";
+        ? `Elementos visibles (usa el #id con PAGE_CLICK, PAGE_TYPE, PAGE_HIGHLIGHT o PAGE_SCROLL_TO):\n${lines.join("\n")}`
+        : "No se detectaron elementos visibles en esta vista.";
 
     return {
       ok: true,
@@ -438,6 +575,61 @@ export async function performPageAction(action: PageActionPayload): Promise<Page
       else if (action.direction === "up") window.scrollBy({ top: -step, behavior: "smooth" });
       else window.scrollBy({ top: step, behavior: "smooth" });
       return { ok: true, detail: `Scroll ${action.direction}` };
+    }
+
+    if (action.kind === "scroll_to") {
+      const el = findElementByTarget(action.target, false);
+      if (!el) return { ok: false, error: `No encontré "${action.target}".` };
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+      flashElement(el);
+      return { ok: true, detail: `Desplazado a "${getElementLabel(el) || action.target}"` };
+    }
+
+    if (action.kind === "highlight") {
+      const el = findElementByTarget(action.target, false);
+      if (!el) return { ok: false, error: `No encontré "${action.target}" para resaltar.` };
+      highlightElement(el, action.label);
+      return { ok: true, detail: `Resaltado "${getElementLabel(el) || action.target}"` };
+    }
+
+    if (action.kind === "clear_highlights") {
+      clearAllHighlights();
+      return { ok: true, detail: "Resaltados limpiados" };
+    }
+
+    if (action.kind === "find_text") {
+      const needle = normalizeText(action.query);
+      if (!needle) return { ok: false, error: "Texto vacío." };
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node: Node | null;
+      while ((node = walker.nextNode())) {
+        const parent = node.parentElement;
+        if (!parent) continue;
+        if (parent.closest("#reco-ext-host, #reco-draw-host, #reco-chat-host, script, style, noscript")) continue;
+        const txt = normalizeText(node.textContent || "");
+        if (!txt || !txt.includes(needle)) continue;
+        const r = parent.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        highlightElement(parent, action.query);
+        return { ok: true, detail: `Texto encontrado: "${action.query}"` };
+      }
+      return { ok: false, error: `No encontré "${action.query}" en la página.` };
+    }
+
+    if (action.kind === "copy") {
+      try {
+        await navigator.clipboard.writeText(action.text);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = action.text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+      }
+      return { ok: true, detail: "Copiado al portapapeles" };
     }
 
     return { ok: false, error: "Acción de página no soportada." };

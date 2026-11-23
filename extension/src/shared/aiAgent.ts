@@ -32,7 +32,7 @@ const VISION_INTENT_RE =
   /\b(mira|míra|mirar|observa|ver|ves|veo|viendo|puedes ver|qué ves|que ves|qué hay|que hay|revisa|pantalla|página|pagina|estoy haciendo|hago|estoy viendo|dibuj\w*|trazo|trazos|pizarra|bosquejo|esquema|analiza esto|mira esto|captura|imagen|foto|aquí|aqui|esto que)\b/i;
 
 const PAGE_INTERACT_INTENT_RE =
-  /\b(abre|abrir|abrí|abri|clic|click|pulsa|pulsar|presiona|presionar|toca|tocar|dale|selecciona|elige|escribe|escribir|redacta|redactar|pon|ponle|llena|rellena|borra|busca|buscar|envia|envía|enviar|manda|mandar|responde|responder|baja|sube|scroll|desplaza|entra|ve a|ir a|navega|pestaña|correo|correos|email|mail|mensaje|botón|boton|campo|enlace|link|formulario|asunto|destinatario)\b/i;
+  /\b(abre|abrir|abrí|abri|clic|click|pulsa|pulsar|presiona|presionar|toca|tocar|dale|selecciona|elige|escribe|escribir|redacta|redactar|pon|ponle|llena|rellena|borra|busca|buscar|encuentra|envia|envía|enviar|manda|mandar|responde|responder|baja|sube|scroll|desplaza|entra|ve a|ir a|navega|pestaña|correo|correos|email|mail|mensaje|botón|boton|campo|enlace|link|formulario|asunto|destinatario|resalta|resaltar|resáltala|resaltala|señala|señalar|señálala|señálame|senala|senalar|marca|marcar|subraya|encuadra|recuadro|apunta|indica|muestra|muéstrame|muestrame|dónde está|donde esta|dónde dice|donde dice|copia|copiar|atrás|atras|adelante|recarga|refresca|quita|limpia)\b/i;
 
 const catalogCache = new Map<string, { at: number; models: FreePiModel[] }>();
 
@@ -89,15 +89,21 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:NEW_CHAT]] -> limpiar el historial y empezar una conversación nueva con contexto vacío (úsalo cuando pidan nuevo chat, nueva conversación, borrar contexto o empezar de cero; NO abras la ventana de chat ni el panel al hacer esto)\n" +
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante (solo si piden explícitamente ver o abrir la ventana; NO la uses para crear un nuevo chat)\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
-    "- [[ACTION:PAGE_CLICK|<id_o_texto>]] -> hacer clic en un botón, enlace o correo de la página activa (usa el #id de la lista de elementos visibles, o su texto)\n" +
+    "- [[ACTION:PAGE_CLICK|<id_o_texto>]] -> hacer clic en un botón, enlace, imagen o correo de la página activa (usa el #id de la lista de elementos visibles, o su texto)\n" +
     "- [[ACTION:PAGE_TYPE|<id_o_active>|<texto>]] -> escribir texto en un campo o editor de la página (usa el #id del campo o `active` para el campo con foco)\n" +
     "- [[ACTION:PAGE_PRESS|<Enter|Escape|Tab>]] -> pulsar una tecla en el elemento activo\n" +
+    "- [[ACTION:PAGE_HIGHLIGHT|<id_o_texto>|<etiqueta_opcional>]] -> señalar/resaltar con un recuadro brillante cualquier imagen, botón, enlace o sección de la página (puedes resaltar varios a la vez)\n" +
+    "- [[ACTION:PAGE_CLEAR_HIGHLIGHTS]] -> quitar los recuadros de resaltado de la página\n" +
+    "- [[ACTION:PAGE_FIND|<texto>]] -> buscar un texto en la página, desplazarse hasta él y encerrarlo en un recuadro\n" +
     "- [[ACTION:PAGE_SCROLL|<down|up|top|bottom>]] -> desplazar la página\n" +
+    "- [[ACTION:PAGE_SCROLL_TO|<id_o_texto>]] -> desplazar la vista directamente hasta un elemento o sección\n" +
+    "- [[ACTION:PAGE_COPY|<texto>]] -> copiar un texto o enlace al portapapeles del usuario\n" +
+    "- [[ACTION:PAGE_BACK]] / [[ACTION:PAGE_FORWARD]] / [[ACTION:PAGE_RELOAD]] -> volver atrás, ir adelante o recargar la pestaña\n" +
     "- [[ACTION:PAGE_NAVIGATE|<url>]] -> abrir una URL en la pestaña actual\n" +
     "- [[ACTION:PAGE_OPEN_TAB|<url>]] -> abrir una URL en una pestaña nueva\n" +
-    "SÍ tienes visión y SÍ puedes interactuar directamente con la página web activa (hacer clic, abrir correos o enlaces, escribir en campos, buscar, hacer scroll y navegar). " +
-    "Cuando el usuario te pida ver o hacer algo en la página, recibirás la lista numerada de elementos visibles (y captura de pantalla cuando aplique). " +
-    "Puedes encadenar varias acciones si los campos ya están visibles; si primero necesitas abrir un formulario (por ejemplo pulsar 'Redactar' o 'Correo nuevo'), haz clic primero y avisa que ya quedó abierto. " +
+    "SÍ tienes visión y SÍ puedes interactuar y señalar elementos en la página web activa: puedes encerrar imágenes, textos o botones en un recuadro brillante (`PAGE_HIGHLIGHT` / `PAGE_FIND`), hacer clic, abrir correos o enlaces, escribir en campos, copiar al portapapeles, hacer scroll y navegar. " +
+    "Cuando el usuario te pida ver, señalar o hacer algo en la página, recibirás la lista numerada de elementos visibles (incluidas imágenes y títulos) y captura de pantalla cuando aplique. " +
+    "Puedes encadenar varias acciones si los elementos ya están visibles; si primero necesitas abrir un formulario (por ejemplo pulsar 'Redactar' o 'Correo nuevo'), haz clic primero y avisa que ya quedó abierto. " +
     "Por seguridad, nunca pulses botones de Enviar, Eliminar o Pagar a menos que el usuario te lo pida explícitamente."
   );
 }
@@ -137,6 +143,27 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       }
     } else if (cmd === "PAGE_PRESS" && arg) {
       await runPageAction({ kind: "press", key: arg }, `tecla: ${arg}`);
+    } else if (cmd === "PAGE_HIGHLIGHT" && arg) {
+      const sep = arg.indexOf("|");
+      const target = sep >= 0 ? arg.slice(0, sep).trim() : arg;
+      const label = sep >= 0 ? arg.slice(sep + 1).trim() : undefined;
+      if (target) {
+        await runPageAction({ kind: "highlight", target, label }, `resaltar: ${target}`);
+      }
+    } else if (cmd === "PAGE_CLEAR_HIGHLIGHTS") {
+      await runPageAction({ kind: "clear_highlights" }, "limpiar resaltados");
+    } else if (cmd === "PAGE_FIND" && arg) {
+      await runPageAction({ kind: "find_text", query: arg }, `buscar texto: ${arg}`);
+    } else if (cmd === "PAGE_SCROLL_TO" && arg) {
+      await runPageAction({ kind: "scroll_to", target: arg }, `ir al elemento: ${arg}`);
+    } else if (cmd === "PAGE_COPY" && arg) {
+      await runPageAction({ kind: "copy", text: arg }, "copiado al portapapeles");
+    } else if (cmd === "PAGE_BACK") {
+      await runPageAction({ kind: "history", direction: "back" }, "atrás");
+    } else if (cmd === "PAGE_FORWARD") {
+      await runPageAction({ kind: "history", direction: "forward" }, "adelante");
+    } else if (cmd === "PAGE_RELOAD") {
+      await runPageAction({ kind: "history", direction: "reload" }, "recargar");
     } else if (cmd === "PAGE_SCROLL" && (arg === "up" || arg === "down" || arg === "top" || arg === "bottom")) {
       await runPageAction({ kind: "scroll", direction: arg }, `scroll: ${arg}`);
     } else if (cmd === "PAGE_NAVIGATE" && arg) {
