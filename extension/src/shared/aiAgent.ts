@@ -16,7 +16,16 @@ import {
   type FreePiChatMessage,
   type FreePiModel,
 } from "./freepiClient";
-import { clearChatMessages, getChatMessages, getConfig, patchConfig, saveChatMessages } from "./storage";
+import {
+  clearChatMessages,
+  getChatMessages,
+  getChatSummary,
+  getConfig,
+  patchConfig,
+  rotateFreePiSessionId,
+  saveChatMessages,
+  saveChatSummary,
+} from "./storage";
 import type {
   AiProviderId,
   AppConfig,
@@ -234,6 +243,151 @@ export async function executeActionTags(raw: string): Promise<string[]> {
   return executed;
 }
 
+const PROACTIVE_COMPACT_MSGS = 12;
+const PROACTIVE_COMPACT_CHARS = 12_000;
+const KEEP_RECENT_AFTER_COMPACT = 4;
+
+function isContextOverflowError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /too long|\/compact|\/new|context.?length|max.*token|token.?limit|payload too large|request too large|entity too large|413|exceeds.*limit|prompt is too long/i.test(
+    msg,
+  );
+}
+
+function estimateHistoryChars(msgs: PersistedChatMessage[]): number {
+  let total = 0;
+  for (const m of msgs) {
+    total += m.text.length;
+    for (const a of m.attachments ?? []) {
+      if (a.kind === "doc" && a.textContent) total += a.textContent.length;
+    }
+  }
+  return total;
+}
+
+function buildExtractiveSummary(prevSummary: string, msgs: PersistedChatMessage[]): string {
+  const lines: string[] = [];
+  if (prevSummary.trim()) lines.push(prevSummary.trim());
+  for (const m of msgs) {
+    const clean = m.text.replace(/\s+/g, " ").trim();
+    if (!clean) continue;
+    const who = m.role === "user" ? "Usuario" : "RECO";
+    const imgNote = (m.attachments ?? []).some((a) => a.kind === "image") ? " [con captura]" : "";
+    lines.push(`- ${who}${imgNote}: ${clean.slice(0, 180)}${clean.length > 180 ? "…" : ""}`);
+  }
+  const joined = lines.join("\n");
+  return joined.length > 2600 ? joined.slice(-2600) : joined;
+}
+
+async function summarizeMessages(opts: {
+  provider: AiProviderId;
+  key: string;
+  customBaseUrl?: string;
+  model: string;
+  prevSummary: string;
+  dropped: PersistedChatMessage[];
+}): Promise<string> {
+  const fallback = buildExtractiveSummary(opts.prevSummary, opts.dropped);
+  if (opts.dropped.length === 0) return opts.prevSummary;
+
+  const transcript = opts.dropped
+    .filter((m) => m.text.trim())
+    .map((m) => `${m.role === "user" ? "Usuario" : "RECO"}: ${m.text.trim().slice(0, 400)}`)
+    .join("\n")
+    .slice(0, 8000);
+
+  if (!transcript) return fallback;
+
+  // Rotate FreePi session before summarizing so the summary request starts on a clean session
+  if (opts.provider === "freepi") {
+    await rotateFreePiSessionId();
+  }
+
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await streamProviderChat({
+      provider: opts.provider,
+      key: opts.key,
+      customBaseUrl: opts.customBaseUrl,
+      model: opts.model,
+      signal: ctrl.signal,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Resume de forma ultra-concisa (máximo 6 viñetas breves en español) los hechos clave, preferencias, páginas visitadas y tareas pendientes de esta conversación para mantener memoria de contexto. Sin introducción ni despedida.",
+        },
+        {
+          role: "user",
+          content: `${opts.prevSummary ? `Resumen anterior:\n${opts.prevSummary}\n\n` : ""}Nuevos mensajes a compactar:\n${transcript}`,
+        },
+      ],
+    });
+    const out = res.text.trim();
+    return out ? out.slice(0, 2600) : fallback;
+  } catch {
+    return fallback;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildWireMessages(opts: {
+  cfg: AppConfig;
+  summary: string;
+  history: PersistedChatMessage[];
+  pageContextNote: string;
+}): FreePiChatMessage[] {
+  const systemBase = buildRecoSystemPrompt(opts.cfg);
+  const systemContent = opts.summary.trim()
+    ? `${systemBase}\n\nMemoria compactada de la conversación previa:\n${opts.summary.trim()}`
+    : systemBase;
+
+  const wireMessages: FreePiChatMessage[] = [{ role: "system", content: systemContent }];
+
+  // Keep only non-empty messages and drop trailing empty assistant placeholder
+  const clean = opts.history.filter((m) => m.text.trim().length > 0 || (m.attachments?.length ?? 0) > 0);
+  const turnSlice = clean.slice(-10);
+
+  for (let idx = 0; idx < turnSlice.length; idx += 1) {
+    const m = turnSlice[idx];
+    if (m.role === "assistant") {
+      if (m.text.trim()) {
+        wireMessages.push({ role: "assistant", content: m.text });
+      }
+      continue;
+    }
+
+    const isCurrentTurn = idx === turnSlice.length - 1;
+    const docs = (m.attachments ?? []).filter((a) => a.kind === "doc" && a.textContent);
+    const imgs = (m.attachments ?? []).filter((a) => a.kind === "image" && a.dataUrl);
+    const docPrefix = docs
+      .map((d) => `[Documento: ${d.name}]\n${(d.textContent ?? "").slice(0, isCurrentTurn ? 12_000 : 1200)}`)
+      .join("\n\n");
+    const pagePrefix = isCurrentTurn && opts.pageContextNote ? `${opts.pageContextNote}\n\n` : "";
+
+    // Only attach full base64 images on the current turn to avoid blowing context/payload limits
+    if (isCurrentTurn && imgs.length > 0) {
+      const combinedText = `${pagePrefix}${docPrefix ? `${docPrefix}\n\n` : ""}${m.text}`;
+      const parts: ChatMessagePart[] = [{ type: "text", text: combinedText }];
+      for (const img of imgs.slice(0, 2)) {
+        parts.push({ type: "image_url", image_url: { url: img.dataUrl! } });
+      }
+      wireMessages.push({ role: "user", content: parts });
+    } else {
+      const imgNote =
+        imgs.length > 0
+          ? `[Imagen previa adjunta: ${imgs.map((i) => i.name).join(", ")}]\n`
+          : "";
+      const combinedText = `${pagePrefix}${imgNote}${docPrefix ? `${docPrefix}\n\n` : ""}${m.text}`;
+      wireMessages.push({ role: "user", content: combinedText });
+    }
+  }
+
+  return wireMessages;
+}
+
 export async function runRecoAgentTurn(opts: {
   userText: string;
   attachments?: PersistedChatAttachment[];
@@ -251,9 +405,38 @@ export async function runRecoAgentTurn(opts: {
     throw new Error("Conecta un proveedor de IA en el panel lateral (pestaña IA).");
   }
 
+  const trimmedInput = opts.userText.trim();
+
+  // Support explicit slash commands `/new` and `/compact`
+  if (/^\/new$/i.test(trimmedInput)) {
+    await clearChatMessages();
+    return { text: "Listo, inicié una conversación nueva con contexto limpio.", reasoning: "", actions: ["nuevo chat"] };
+  }
+
+  if (/^\/compact$/i.test(trimmedInput)) {
+    const existing = (await getChatMessages()).filter((m) => m.text.trim());
+    const prevSum = await getChatSummary();
+    const newSum = await summarizeMessages({
+      provider,
+      key,
+      customBaseUrl: cfg.ai.customBaseUrl,
+      model,
+      prevSummary: prevSum,
+      dropped: existing,
+    });
+    await saveChatSummary(newSum);
+    await saveChatMessages(existing.slice(-2));
+    if (provider === "freepi") await rotateFreePiSessionId();
+    return {
+      text: "Contexto compactado automáticamente. Podemos seguir sin problema.",
+      reasoning: "",
+      actions: ["contexto compactado"],
+    };
+  }
+
   const atts: PersistedChatAttachment[] = [...(opts.attachments ?? [])];
-  const wantsVision = VISION_INTENT_RE.test(opts.userText);
-  const wantsPageInteract = PAGE_INTERACT_INTENT_RE.test(opts.userText);
+  const wantsVision = VISION_INTENT_RE.test(trimmedInput);
+  const wantsPageInteract = PAGE_INTERACT_INTENT_RE.test(trimmedInput);
 
   // Auto-vision: if user asks RECO to look at screen and no image is attached, capture automatically!
   if (atts.every((a) => a.kind !== "image") && wantsVision) {
@@ -270,7 +453,7 @@ export async function runRecoAgentTurn(opts: {
     }
   }
 
-  // DOM snapshot of visible interactive elements so RECO can click/type/open on the active page
+  // DOM snapshot of visible interactive elements so RECO can click/type/open/highlight on the active page
   let pageContextNote = "";
   if (wantsPageInteract || wantsVision) {
     const snap = (await chrome.runtime
@@ -281,16 +464,45 @@ export async function runRecoAgentTurn(opts: {
     }
   }
 
-  const prevHistory = await getChatMessages();
+  // Sanitize prior history (drop any empty/stuck assistant bubbles from previous failed turns)
+  const rawPrevHistory = await getChatMessages();
+  let prevHistory = rawPrevHistory.filter(
+    (m) => m.role === "user" || m.text.trim().length > 0,
+  );
+  let rollingSummary = await getChatSummary();
+
+  // Proactive auto-compaction before context grows too long
+  if (
+    prevHistory.length >= PROACTIVE_COMPACT_MSGS ||
+    estimateHistoryChars(prevHistory) > PROACTIVE_COMPACT_CHARS
+  ) {
+    const splitAt = Math.max(0, prevHistory.length - KEEP_RECENT_AFTER_COMPACT);
+    const toCompact = prevHistory.slice(0, splitAt);
+    const recent = prevHistory.slice(splitAt);
+    if (toCompact.length > 0) {
+      rollingSummary = await summarizeMessages({
+        provider,
+        key,
+        customBaseUrl: cfg.ai.customBaseUrl,
+        model,
+        prevSummary: rollingSummary,
+        dropped: toCompact,
+      });
+      await saveChatSummary(rollingSummary);
+      prevHistory = recent;
+      if (provider === "freepi") await rotateFreePiSessionId();
+    }
+  }
+
   const userMsg: PersistedChatMessage = {
     id: `u-${Date.now()}`,
     role: "user",
-    text: opts.userText.trim() || "Analiza lo adjunto.",
+    text: trimmedInput || "Analiza lo adjunto.",
     attachments: atts.length > 0 ? atts : undefined,
     createdAt: Date.now(),
   };
   const assistantId = `a-${Date.now() + 1}`;
-  const workingHistory: PersistedChatMessage[] = [
+  let workingHistory: PersistedChatMessage[] = [
     ...prevHistory,
     userMsg,
     { id: assistantId, role: "assistant", text: "", reasoning: "", createdAt: Date.now() },
@@ -298,72 +510,88 @@ export async function runRecoAgentTurn(opts: {
   opts.signal?.throwIfAborted();
   await saveChatMessages(workingHistory);
 
-  const wireMessages: FreePiChatMessage[] = [
-    { role: "system", content: buildRecoSystemPrompt(cfg) },
-  ];
-
-  const turnSlice = workingHistory.slice(-13, -1);
-  for (let idx = 0; idx < turnSlice.length; idx += 1) {
-    const m = turnSlice[idx];
-    if (m.role === "assistant") {
-      wireMessages.push({ role: "assistant", content: m.text });
-      continue;
-    }
-    const isCurrentTurn = idx === turnSlice.length - 1;
-    const docs = (m.attachments ?? []).filter((a) => a.kind === "doc" && a.textContent);
-    const imgs = (m.attachments ?? []).filter((a) => a.kind === "image" && a.dataUrl);
-    const docPrefix = docs.map((d) => `[Documento: ${d.name}]\n${d.textContent}`).join("\n\n");
-    const pagePrefix = isCurrentTurn && pageContextNote ? `${pageContextNote}\n\n` : "";
-    const combinedText = `${pagePrefix}${docPrefix ? `${docPrefix}\n\n` : ""}${m.text}`;
-
-    if (imgs.length > 0) {
-      const parts: ChatMessagePart[] = [{ type: "text", text: combinedText }];
-      for (const img of imgs) {
-        parts.push({ type: "image_url", image_url: { url: img.dataUrl! } });
-      }
-      wireMessages.push({ role: "user", content: parts });
-    } else {
-      wireMessages.push({ role: "user", content: combinedText });
-    }
-  }
-
-  let rawText = "";
-  let reasoningText = "";
-
   const hasImageInTurn = atts.some((a) => a.kind === "image" && a.dataUrl);
   const effectiveModel = hasImageInTurn
     ? await resolveVisionModel(provider, key, cfg.ai.customBaseUrl, model)
     : model;
 
-  const result = await streamProviderChat({
-    provider,
-    key,
-    customBaseUrl: cfg.ai.customBaseUrl,
-    model: effectiveModel,
-    messages: wireMessages,
-    signal: opts.signal,
-    onDelta(chunk) {
-      rawText += chunk;
-      opts.onDelta?.(stripActionTags(rawText));
-    },
-    onReasoning(chunk) {
-      reasoningText += chunk;
-      opts.onReasoning?.(reasoningText);
-    },
-  });
+  const invokeModel = async (summary: string, historyForWire: PersistedChatMessage[]) => {
+    let rawText = "";
+    let reasoningText = "";
+    const wireMessages = buildWireMessages({
+      cfg,
+      summary,
+      history: historyForWire,
+      pageContextNote,
+    });
+    const res = await streamProviderChat({
+      provider,
+      key,
+      customBaseUrl: cfg.ai.customBaseUrl,
+      model: effectiveModel,
+      messages: wireMessages,
+      signal: opts.signal,
+      onDelta(chunk) {
+        rawText += chunk;
+        opts.onDelta?.(stripActionTags(rawText));
+      },
+      onReasoning(chunk) {
+        reasoningText += chunk;
+        opts.onReasoning?.(reasoningText);
+      },
+    });
+    return {
+      finalRaw: res.text || rawText,
+      reasoning: res.reasoning || reasoningText,
+    };
+  };
 
-  const finalRaw = result.text || rawText;
+  let finalRaw = "";
+  let finalReasoning = "";
+
+  try {
+    try {
+      const r = await invokeModel(rollingSummary, [...prevHistory, userMsg]);
+      finalRaw = r.finalRaw;
+      finalReasoning = r.reasoning;
+    } catch (firstErr) {
+      // Reactive auto-compaction + session rotation + automatic retry on context overflow!
+      if (!opts.signal?.aborted && isContextOverflowError(firstErr)) {
+        rollingSummary = buildExtractiveSummary(rollingSummary, prevHistory);
+        await saveChatSummary(rollingSummary);
+        if (provider === "freepi") await rotateFreePiSessionId();
+        prevHistory = [];
+        workingHistory = [
+          userMsg,
+          { id: assistantId, role: "assistant", text: "", reasoning: "", createdAt: Date.now() },
+        ];
+        await saveChatMessages(workingHistory);
+
+        const retry = await invokeModel(rollingSummary, [userMsg]);
+        finalRaw = retry.finalRaw;
+        finalReasoning = retry.reasoning;
+      } else {
+        throw firstErr;
+      }
+    }
+  } catch (err) {
+    // Never leave an empty assistant placeholder stuck in chat history on error/abort
+    const cleaned = workingHistory.filter((m) => m.id !== assistantId);
+    await saveChatMessages(cleaned).catch(() => {});
+    throw err;
+  }
+
   const cleanText = stripActionTags(finalRaw);
   opts.signal?.throwIfAborted();
   const actions = await executeActionTags(finalRaw);
 
   if (!actions.includes("nuevo chat")) {
     const updated = workingHistory.map((m) =>
-      m.id === assistantId ? { ...m, text: cleanText, reasoning: result.reasoning || reasoningText } : m,
+      m.id === assistantId ? { ...m, text: cleanText, reasoning: finalReasoning } : m,
     );
     opts.signal?.throwIfAborted();
     await saveChatMessages(updated);
   }
 
-  return { text: cleanText, reasoning: result.reasoning || reasoningText, actions };
+  return { text: cleanText, reasoning: finalReasoning, actions };
 }

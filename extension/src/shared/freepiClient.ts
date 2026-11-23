@@ -9,6 +9,7 @@
  *  - Personalizado (Ollama / Groq / LM Studio / cualquier API OpenAI-compatible)
  */
 
+import { getOrCreateFreePiSessionId } from "./storage";
 import type { AiProviderId } from "./types";
 
 const FREEPI_ROOT = "https://api.freepi.ai";
@@ -80,7 +81,6 @@ interface FreePiAd {
 let clientVersion = DEFAULT_CLIENT_VERSION;
 let versionAt = 0;
 let versionKnown = false;
-const sessionCache = new Map<string, string>();
 const adCache = new Map<string, { ad: FreePiAd | null; at: number; postedToken: string }>();
 
 function str(v: unknown): string {
@@ -120,19 +120,12 @@ function daysLeft(token: string): number | null {
   }
 }
 
-async function sessionIdFor(token: string): Promise<string> {
-  const seed = token.trim() || `freepi:anon:${new Date().toISOString().slice(0, 10)}`;
-  const cached = sessionCache.get(seed);
-  if (cached) return cached;
-
-  const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(`freepi:${seed}`));
-  const bytes = new Uint8Array(digest);
-  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
-  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
-  const hex = Array.from(bytes.slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
-  const id = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-  sessionCache.set(seed, id);
-  return id;
+async function sessionIdFor(_token: string): Promise<string> {
+  try {
+    return await getOrCreateFreePiSessionId();
+  } catch {
+    return crypto.randomUUID();
+  }
 }
 
 async function ensureClientVersion(token: string, force = false): Promise<string> {
@@ -501,6 +494,29 @@ export async function streamProviderChat(opts: {
 }): Promise<{ text: string; reasoning: string }> {
   const { provider, key, customBaseUrl, model, messages, signal, onDelta, onReasoning } = opts;
 
+  const STREAM_IDLE_TIMEOUT_MS = 45_000;
+  const internalAbort = new AbortController();
+  let timedOut = false;
+  let idleTimer: number | null = null;
+  const resetIdleTimer = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = window.setTimeout(() => {
+      timedOut = true;
+      internalAbort.abort();
+    }, STREAM_IDLE_TIMEOUT_MS);
+  };
+  const onExternalAbort = () => internalAbort.abort();
+  if (signal?.aborted) internalAbort.abort();
+  else signal?.addEventListener("abort", onExternalAbort, { once: true });
+
+  const combinedSignal = internalAbort.signal;
+
+  const cleanupTimers = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = null;
+    signal?.removeEventListener("abort", onExternalAbort);
+  };
+
   if (provider === "freepi") {
     await ensureFreePiAd(key, false);
   }
@@ -527,7 +543,7 @@ export async function streamProviderChat(opts: {
             messages: anthMsgs,
             stream: true,
           }),
-          signal,
+          signal: combinedSignal,
         },
       };
     }
@@ -566,125 +582,139 @@ export async function streamProviderChat(opts: {
         method: "POST",
         headers,
         body: JSON.stringify({ model, messages, stream: true }),
-        signal,
+        signal: combinedSignal,
       },
     };
   };
 
-  let req = await buildRequest();
-  let res = await fetch(req.url, req.init);
-
-  if (provider === "freepi" && res.status === 403) {
-    const detail = await res.clone().text().catch(() => "");
-    if (/ads_required|ads aren't displaying|ads aren't shown/i.test(detail)) {
-      if (await ensureFreePiAd(key, true)) {
-        req = await buildRequest();
-        res = await fetch(req.url, req.init);
-      }
-    }
-  }
-
-  if (provider === "freepi" && res.status === 409) {
-    await new Promise((r) => setTimeout(r, 1400));
-    if (!signal?.aborted) {
-      req = await buildRequest();
-      res = await fetch(req.url, req.init);
-    }
-  }
-
-  if (!res.ok) {
-    const raw = await res.text().catch(() => "");
-    let msg = raw;
-    try {
-      const parsed = JSON.parse(raw) as { message?: string; error?: { message?: string } | string };
-      msg =
-        parsed.message ||
-        (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
-        raw;
-    } catch {
-      // keep raw
-    }
-    throw new Error(msg.slice(0, 240) || `HTTP ${res.status}`);
-  }
-
-  const contentType = res.headers.get("content-type") ?? "";
-  if (!contentType.includes("text/event-stream")) {
-    const data = (await res.json()) as Record<string, unknown>;
-    if (req.isAnthropic) {
-      const blocks = Array.isArray(data.content) ? data.content : [];
-      const text = blocks
-        .map((b) => (typeof (b as { text?: unknown })?.text === "string" ? (b as { text: string }).text : ""))
-        .join("");
-      if (text) onDelta?.(text);
-      return { text, reasoning: "" };
-    }
-    const choices = Array.isArray(data.choices) ? data.choices : [];
-    const msg = (choices[0] as { message?: { content?: string; reasoning_content?: string } } | undefined)?.message;
-    const text = typeof msg?.content === "string" ? msg.content : "";
-    const reasoning = typeof msg?.reasoning_content === "string" ? msg.reasoning_content : "";
-    if (reasoning) onReasoning?.(reasoning);
-    if (text) onDelta?.(text);
-    return { text: text || reasoning, reasoning };
-  }
-
-  const reader = res.body?.getReader();
-  if (!reader) return { text: "", reasoning: "" };
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let text = "";
-  let reasoning = "";
-
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice(5).trim();
-        if (payload === "[DONE]") return { text: text || reasoning, reasoning };
-        try {
-          const parsed = JSON.parse(payload) as Record<string, unknown>;
-          if (req.isAnthropic) {
-            const delta = parsed.delta as { type?: string; text?: string; thinking?: string } | undefined;
-            if (delta?.type === "text_delta" && typeof delta.text === "string") {
-              text += delta.text;
-              onDelta?.(delta.text);
-            } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
-              reasoning += delta.thinking;
-              onReasoning?.(delta.thinking);
-            }
-          } else {
-            const choices = parsed.choices as Array<{
-              delta?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown };
-            }> | undefined;
-            const delta = choices?.[0]?.delta;
-            const r =
-              typeof delta?.reasoning_content === "string"
-                ? delta.reasoning_content
-                : typeof delta?.reasoning === "string"
-                  ? delta.reasoning
-                  : "";
-            if (r) {
-              reasoning += r;
-              onReasoning?.(r);
-            }
-            if (typeof delta?.content === "string" && delta.content) {
-              text += delta.content;
-              onDelta?.(delta.content);
-            }
-          }
-        } catch {
-          // ignore partial JSON
+    resetIdleTimer();
+    let req = await buildRequest();
+    let res = await fetch(req.url, req.init);
+    resetIdleTimer();
+
+    if (provider === "freepi" && res.status === 403) {
+      const detail = await res.clone().text().catch(() => "");
+      if (/ads_required|ads aren't displaying|ads aren't shown/i.test(detail)) {
+        if (await ensureFreePiAd(key, true)) {
+          req = await buildRequest();
+          res = await fetch(req.url, req.init);
+          resetIdleTimer();
         }
       }
     }
-  } finally {
-    reader.releaseLock();
-  }
 
-  return { text: text || reasoning, reasoning };
+    if (provider === "freepi" && res.status === 409) {
+      await new Promise((r) => setTimeout(r, 1400));
+      if (!combinedSignal.aborted) {
+        req = await buildRequest();
+        res = await fetch(req.url, req.init);
+        resetIdleTimer();
+      }
+    }
+
+    if (!res.ok) {
+      const raw = await res.text().catch(() => "");
+      let msg = raw;
+      try {
+        const parsed = JSON.parse(raw) as { message?: string; error?: { message?: string } | string };
+        msg =
+          parsed.message ||
+          (typeof parsed.error === "string" ? parsed.error : parsed.error?.message) ||
+          raw;
+      } catch {
+        // keep raw
+      }
+      throw new Error(msg.slice(0, 240) || `HTTP ${res.status}`);
+    }
+
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("text/event-stream")) {
+      const data = (await res.json()) as Record<string, unknown>;
+      if (req.isAnthropic) {
+        const blocks = Array.isArray(data.content) ? data.content : [];
+        const text = blocks
+          .map((b) => (typeof (b as { text?: unknown })?.text === "string" ? (b as { text: string }).text : ""))
+          .join("");
+        if (text) onDelta?.(text);
+        return { text, reasoning: "" };
+      }
+      const choices = Array.isArray(data.choices) ? data.choices : [];
+      const msg = (choices[0] as { message?: { content?: string; reasoning_content?: string } } | undefined)?.message;
+      const text = typeof msg?.content === "string" ? msg.content : "";
+      const reasoning = typeof msg?.reasoning_content === "string" ? msg.reasoning_content : "";
+      if (reasoning) onReasoning?.(reasoning);
+      if (text) onDelta?.(text);
+      return { text: text || reasoning, reasoning };
+    }
+
+    const reader = res.body?.getReader();
+    if (!reader) return { text: "", reasoning: "" };
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    let reasoning = "";
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        resetIdleTimer();
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") return { text: text || reasoning, reasoning };
+          try {
+            const parsed = JSON.parse(payload) as Record<string, unknown>;
+            if (req.isAnthropic) {
+              const delta = parsed.delta as { type?: string; text?: string; thinking?: string } | undefined;
+              if (delta?.type === "text_delta" && typeof delta.text === "string") {
+                text += delta.text;
+                onDelta?.(delta.text);
+              } else if (delta?.type === "thinking_delta" && typeof delta.thinking === "string") {
+                reasoning += delta.thinking;
+                onReasoning?.(delta.thinking);
+              }
+            } else {
+              const choices = parsed.choices as Array<{
+                delta?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown };
+              }> | undefined;
+              const delta = choices?.[0]?.delta;
+              const r =
+                typeof delta?.reasoning_content === "string"
+                  ? delta.reasoning_content
+                  : typeof delta?.reasoning === "string"
+                    ? delta.reasoning
+                    : "";
+              if (r) {
+                reasoning += r;
+                onReasoning?.(r);
+              }
+              if (typeof delta?.content === "string" && delta.content) {
+                text += delta.content;
+                onDelta?.(delta.content);
+              }
+            }
+          } catch {
+            // ignore partial JSON
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return { text: text || reasoning, reasoning };
+  } catch (err) {
+    if (timedOut) {
+      throw new Error("Tiempo de espera agotado al responder. Intenta de nuevo.");
+    }
+    throw err;
+  } finally {
+    cleanupTimers();
+  }
 }

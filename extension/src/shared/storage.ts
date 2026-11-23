@@ -10,6 +10,8 @@ const RECORDINGS_KEY = "reco_ext_recordings_v1";
 const DICTATION_HISTORY_KEY = "reco_ext_dictation_history_v1";
 const CACHED_MODELS_KEY = "reco_ext_cached_models_v1";
 const CHAT_MESSAGES_KEY = "reco_ext_chat_messages_v1";
+const CHAT_SUMMARY_KEY = "reco_ext_chat_summary_v1";
+const FREEPI_SESSION_KEY = "reco_ext_freepi_session_v1";
 const CUSTOM_VOICE_KEY = "reco_ext_custom_voice_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
@@ -189,8 +191,36 @@ export async function saveChatMessages(msgs: PersistedChatMessage[]): Promise<vo
   await chrome.storage.local.set({ [CHAT_MESSAGES_KEY]: trimmed });
 }
 
+export async function getChatSummary(): Promise<string> {
+  const data = await chrome.storage.local.get(CHAT_SUMMARY_KEY);
+  return typeof data[CHAT_SUMMARY_KEY] === "string" ? data[CHAT_SUMMARY_KEY] : "";
+}
+
+export async function saveChatSummary(summary: string): Promise<void> {
+  await chrome.storage.local.set({ [CHAT_SUMMARY_KEY]: summary.trim().slice(0, 4000) });
+}
+
+export async function getOrCreateFreePiSessionId(): Promise<string> {
+  const data = await chrome.storage.local.get(FREEPI_SESSION_KEY);
+  const existing = data[FREEPI_SESSION_KEY];
+  if (typeof existing === "string" && existing.length >= 16) return existing;
+  const fresh = crypto.randomUUID();
+  await chrome.storage.local.set({ [FREEPI_SESSION_KEY]: fresh });
+  return fresh;
+}
+
+export async function rotateFreePiSessionId(): Promise<string> {
+  const fresh = crypto.randomUUID();
+  await chrome.storage.local.set({ [FREEPI_SESSION_KEY]: fresh });
+  return fresh;
+}
+
 export async function clearChatMessages(): Promise<void> {
-  await chrome.storage.local.set({ [CHAT_MESSAGES_KEY]: [] });
+  await chrome.storage.local.set({
+    [CHAT_MESSAGES_KEY]: [],
+    [CHAT_SUMMARY_KEY]: "",
+    [FREEPI_SESSION_KEY]: crypto.randomUUID(),
+  });
 }
 
 export interface StoredCustomVoice {
