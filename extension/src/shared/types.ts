@@ -1,6 +1,6 @@
 export type DictationPhase = "idle" | "listening" | "inserting" | "error";
 
-export type SpeechEngineType = "wispr" | "chrome" | "whisper_tiny" | "whisper_base";
+export type SpeechEngineType = "wispr" | "wispr_web" | "chrome" | "whisper_tiny" | "whisper_base";
 
 export type RecordingPhase = "idle" | "recording" | "paused" | "uploading";
 

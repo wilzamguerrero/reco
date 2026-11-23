@@ -79,7 +79,7 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:OPEN_DRAW]] -> abrir pizarra de dibujo sobre la página\n" +
     "- [[ACTION:CLOSE_DRAW]] -> cerrar pizarra de dibujo\n" +
     "- [[ACTION:START_DICTATION]] -> activar dictado normal en el cursor\n" +
-    "- [[ACTION:SET_SPEECH_ENGINE|chrome]] o wispr o whisper_tiny o whisper_base -> cambiar motor de dictado\n" +
+    "- [[ACTION:SET_SPEECH_ENGINE|chrome]] o wispr o wispr_web o whisper_tiny o whisper_base -> cambiar motor de dictado (wispr_web es la demo gratuita sin clave)\n" +
     "- [[ACTION:SET_TTS|supertonic]] o pocket o pocket-web o piper o kokoro o moss o system o off -> cambiar voz de respuesta\n" +
     "- [[ACTION:SET_AI_MODEL|<id_modelo>]] -> cambiar modelo de IA\n" +
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante\n" +
@@ -124,7 +124,7 @@ export async function executeActionTags(raw: string): Promise<string[]> {
     } else if (cmd === "OPEN_PANEL") {
       await chrome.runtime.sendMessage({ type: "OPEN_SIDEPANEL" } satisfies ExtMessage).catch(() => {});
       executed.push("panel abierto");
-    } else if (cmd === "SET_SPEECH_ENGINE" && (arg === "wispr" || arg === "chrome" || arg === "whisper_tiny" || arg === "whisper_base")) {
+    } else if (cmd === "SET_SPEECH_ENGINE" && (arg === "wispr" || arg === "wispr_web" || arg === "chrome" || arg === "whisper_tiny" || arg === "whisper_base")) {
       const cfg = await getConfig();
       const next = await patchConfig({ dictation: { ...cfg.dictation, engine: arg as SpeechEngineType } });
       await chrome.runtime.sendMessage({ type: "CONFIG_UPDATED", config: next } satisfies ExtMessage).catch(() => {});

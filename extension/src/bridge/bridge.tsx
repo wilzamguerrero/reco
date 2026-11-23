@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { runRecoAgentTurn } from "../shared/aiAgent";
 import { isPlaybackEcho, speakReply, stopSpeaking, updateSpeakingVoice } from "../shared/kokoroTts";
-import { createWisprEngine } from "../shared/wisprEngine";
+import { createWisprEngine, createWisprWebEngine } from "../shared/wisprEngine";
 import { createSpeechEngine, type SpeechEngineHandle } from "../shared/speechEngine";
 import { getConfig, watchConfig } from "../shared/storage";
 import type { AiAssistantConfig, ExtMessage } from "../shared/types";
@@ -182,6 +182,7 @@ function BridgeApp() {
 
         engine =
           cfg.dictation.engine === "wispr" ? createWisprEngine(aiCallbacks) :
+          cfg.dictation.engine === "wispr_web" ? createWisprWebEngine(aiCallbacks) :
           cfg.dictation.engine === "chrome"
             ? createSpeechEngine(aiCallbacks)
             : createWhisperEngine({
@@ -217,7 +218,7 @@ function BridgeApp() {
           setStatus(
             cfg.dictation.engine === "chrome"
               ? "Escuchando (Chrome) · Coloca el cursor donde quieras escribir"
-              : cfg.dictation.engine === "wispr" ? "Escuchando con Wispr Flow" : "Escuchando (Whisper local) · Habla y haz micro-pausas",
+              : cfg.dictation.engine === "wispr" ? "Escuchando con Wispr Flow" : cfg.dictation.engine === "wispr_web" ? "Escuchando (Wispr Web) · dictá frases cortas" : "Escuchando (Whisper local) · Habla y haz micro-pausas",
           );
           void chrome.runtime.sendMessage({ type: "DICTATION_STATUS", status: null } satisfies ExtMessage);
           void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
@@ -251,6 +252,7 @@ function BridgeApp() {
 
       engine =
         cfg.dictation.engine === "wispr" ? createWisprEngine(engineCallbacks) :
+        cfg.dictation.engine === "wispr_web" ? createWisprWebEngine(engineCallbacks) :
           cfg.dictation.engine === "chrome"
           ? createSpeechEngine(engineCallbacks)
           : createWhisperEngine({

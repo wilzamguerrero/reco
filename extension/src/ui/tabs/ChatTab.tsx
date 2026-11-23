@@ -7,7 +7,7 @@ import {
   type FreePiModel,
 } from "../../shared/freepiClient";
 import { isPlaybackEcho, speakReply, stopSpeaking, updateSpeakingVoice } from "../../shared/kokoroTts";
-import { createWisprEngine } from "../../shared/wisprEngine";
+import { createWisprEngine, createWisprWebEngine } from "../../shared/wisprEngine";
 import { createSpeechEngine, type SpeechEngineHandle } from "../../shared/speechEngine";
 import { clearChatMessages, getChatMessages } from "../../shared/storage";
 import type {
@@ -264,7 +264,10 @@ export function ChatTab({
       setTtsStatus(null);
     }
     let loudSince = 0;
-    const makeEngine = config.dictation.engine === "wispr" ? createWisprEngine : createSpeechEngine;
+    const makeEngine =
+      config.dictation.engine === "wispr" ? createWisprEngine :
+      config.dictation.engine === "wispr_web" ? createWisprWebEngine :
+      createSpeechEngine;
     const eng = makeEngine({
       language: config.dictation.language,
       polish: config.dictation.polish,

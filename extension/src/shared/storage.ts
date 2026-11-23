@@ -65,6 +65,7 @@ function mergeConfig(raw: Partial<AppConfig> | undefined): AppConfig {
   const mergedDict = { ...DEFAULT_CONFIG.dictation, ...(raw?.dictation ?? {}) };
   if (
     mergedDict.engine !== "wispr" &&
+    mergedDict.engine !== "wispr_web" &&
     mergedDict.engine !== "chrome" &&
     mergedDict.engine !== "whisper_tiny" &&
     mergedDict.engine !== "whisper_base"

@@ -42,7 +42,37 @@ function installPocketAudioRule() {
   });
 }
 
+// The Wispr Web demo backend returns 403 unless the request looks like it comes
+// from wisprflow.ai (Origin/Referer), as the original web demo does.
+function installWisprWebRule() {
+  const H = chrome.declarativeNetRequest.HeaderOperation.SET;
+  return chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: [2],
+    addRules: [{
+      id: 2,
+      priority: 1,
+      action: {
+        type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+        requestHeaders: [
+          { header: "origin", operation: H, value: "https://wisprflow.ai" },
+          { header: "referer", operation: H, value: "https://wisprflow.ai/" },
+        ],
+      },
+      condition: {
+        regexFilter: "^(https|wss)://api[.]wisprflow[.]ai/",
+        initiatorDomains: [chrome.runtime.id],
+        resourceTypes: [
+          chrome.declarativeNetRequest.ResourceType.XMLHTTPREQUEST,
+          chrome.declarativeNetRequest.ResourceType.WEBSOCKET,
+        ],
+      },
+    }],
+  });
+}
+
 chrome.runtime.onInstalled.addListener(installPocketAudioRule);
+chrome.runtime.onInstalled.addListener(installWisprWebRule);
+installWisprWebRule().catch(() => {});
 
 let state: LiveState = {
   dictationPhase: "idle",
@@ -357,7 +387,7 @@ async function startDictation(explicitTabId?: number) {
 
   // Intentar conectar host nativo en silencio por si el usuario dicta fuera de Chrome
   const cfg = await getConfig();
-  wisprDictation = cfg.dictation.engine === "wispr";
+  wisprDictation = cfg.dictation.engine === "wispr" || cfg.dictation.engine === "wispr_web";
   if (cfg.dictation.desktopTyping) {
     void ensureNativePort();
   }
@@ -372,7 +402,7 @@ async function startDictation(explicitTabId?: number) {
     dictationInterim: "",
     dictationTranscript: "",
     dictationStatus:
-      cfg.dictation.engine === "wispr" ? "Conectando con Wispr Flow" : cfg.dictation.engine === "chrome" ? null : "Preparando modelo local…",
+      cfg.dictation.engine === "wispr" ? "Conectando con Wispr Flow" : cfg.dictation.engine === "wispr_web" ? "Conectando con Wispr Web…" : cfg.dictation.engine === "chrome" ? null : "Preparando modelo local…",
     dictationError: null,
     dictationLevel: 0,
   };

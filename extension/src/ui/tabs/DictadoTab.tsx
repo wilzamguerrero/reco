@@ -12,7 +12,8 @@ import { WISPR_SESSION_KEY } from "../../shared/wisprEngine";
 import { Icon } from "../components/Icon";
 
 const ENGINES: { id: SpeechEngineType; label: string; tip: string }[] = [
-  { id: "wispr", label: "WISPR FLOW", tip: "Transcribir con Wispr Flow en la nube" },
+  { id: "wispr", label: "WISPR FLOW", tip: "Transcribir con Wispr Flow en la nube (requiere clave fl-…)" },
+  { id: "wispr_web", label: "WISPR WEB", tip: "Demo Web de Wispr Flow, gratis y sin clave; ideal para dictados cortos y rápidos" },
   { id: "chrome", label: "CHROME", tip: "Web Speech en tiempo real (0 MB, multilingüe)" },
   { id: "whisper_tiny", label: "WHISPER S", tip: "Whisper Tiny local (multilingüe ES/EN, ~40 MB, offline)" },
   { id: "whisper_base", label: "WHISPER M", tip: "Whisper Base local (multilingüe ES/EN, ~75 MB, más preciso)" },
@@ -268,6 +269,12 @@ export function DictadoTab({
         </div>
       </div>
 
+      {d.engine === "wispr_web" && (
+        <div className="ok-box" style={{ fontSize: 11 }}>
+          Modo gratuito: usa la demo Web de Wispr Flow como los atajos pagos, sin
+          clave. Ideal para frases cortas; la demo puede limitar el uso continuo.
+        </div>
+      )}
       {d.engine === "wispr" && (
         <div className="pane-col">
           <label className="pane-label" htmlFor="wispr-key">Clave API de Wispr Flow</label>

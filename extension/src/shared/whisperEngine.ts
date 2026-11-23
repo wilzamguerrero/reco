@@ -14,7 +14,7 @@ import type { SpeechEngineHandle, SpeechEngineOptions } from "./speechEngine";
 import { getCachedModels, markModelCached } from "./storage";
 import type { SpeechEngineType } from "./types";
 
-export type LocalAsrModel = Exclude<SpeechEngineType, "chrome" | "wispr">;
+export type LocalAsrModel = Exclude<SpeechEngineType, "chrome" | "wispr" | "wispr_web">;
 
 interface ModelSpec {
   id: string;
