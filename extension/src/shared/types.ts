@@ -205,6 +205,7 @@ export type BrowserActionPayload =
 
 export type PageActionPayload =
   | { kind: "click"; target: string }
+  | { kind: "click_xy"; xPct: number; yPct: number }
   | { kind: "type"; target: string; text: string; clear?: boolean }
   | { kind: "press"; key: string }
   | { kind: "scroll"; direction: "up" | "down" | "top" | "bottom" }

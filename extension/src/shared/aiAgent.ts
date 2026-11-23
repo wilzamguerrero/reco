@@ -99,7 +99,8 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:NEW_CHAT]] -> limpiar el historial y empezar una conversación nueva con contexto vacío (úsalo cuando pidan nuevo chat, nueva conversación, borrar contexto o empezar de cero; NO abras la ventana de chat ni el panel al hacer esto)\n" +
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante (solo si piden explícitamente ver o abrir la ventana; NO la uses para crear un nuevo chat)\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
-    "- [[ACTION:PAGE_CLICK|<id_o_texto>]] -> hacer clic en un botón, enlace, imagen o correo de la página activa (usa el #id de la lista de elementos visibles, o su texto)\n" +
+    "- [[ACTION:PAGE_CLICK|<id_o_texto>]] -> hacer clic en un botón, interruptor, muestra de color, enlace, imagen o correo de la página activa (usa preferiblemente el #id exacto de la lista)\n" +
+    "- [[ACTION:PAGE_CLICK_XY|<x_pct>|<y_pct>]] -> hacer clic exacto por coordenadas porcentuales (0-100) del viewport cuando un control visual no esté en la lista\n" +
     "- [[ACTION:PAGE_TYPE|<id_o_active>|<texto>]] -> escribir/añadir texto en un campo o editor de la página (usa el #id del campo/editor o `active`)\n" +
     "- [[ACTION:PAGE_REPLACE|<id_o_active>|<texto>]] -> reemplazar todo el contenido de un campo o editor por el nuevo texto (ideal para editar/parafrasear)\n" +
     "- [[ACTION:PAGE_PRESS|<Enter|Escape|Tab>]] -> pulsar una tecla en el elemento activo\n" +
@@ -139,7 +140,7 @@ export async function executeActionTags(raw: string): Promise<string[]> {
 
   const runPageAction = async (action: PageActionPayload, label: string) => {
     if (hadPageAction) {
-      await new Promise((r) => setTimeout(r, 220));
+      await new Promise((r) => setTimeout(r, 120));
     }
     hadPageAction = true;
     await chrome.runtime
@@ -150,7 +151,7 @@ export async function executeActionTags(raw: string): Promise<string[]> {
 
   const runBrowserAction = async (action: BrowserActionPayload, label: string) => {
     if (hadPageAction) {
-      await new Promise((r) => setTimeout(r, 220));
+      await new Promise((r) => setTimeout(r, 120));
     }
     hadPageAction = true;
     await chrome.runtime
@@ -183,6 +184,11 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       await runBrowserAction({ kind: "open_history", query: arg }, `historial: ${arg}`);
     } else if (cmd === "PAGE_CLICK" && arg) {
       await runPageAction({ kind: "click", target: arg }, `clic: ${arg}`);
+    } else if (cmd === "PAGE_CLICK_XY" && arg) {
+      const parts = arg.split("|").map((s) => Number(s.trim().replace("%", "")));
+      if (parts.length >= 2 && Number.isFinite(parts[0]) && Number.isFinite(parts[1])) {
+        await runPageAction({ kind: "click_xy", xPct: parts[0], yPct: parts[1] }, `clic XY: ${parts[0]}%,${parts[1]}%`);
+      }
     } else if ((cmd === "PAGE_TYPE" || cmd === "PAGE_REPLACE") && arg) {
       const sep = arg.indexOf("|");
       const target = sep >= 0 ? arg.slice(0, sep).trim() : "active";

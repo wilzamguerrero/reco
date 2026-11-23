@@ -25,11 +25,12 @@ export interface PageActionResult {
 }
 
 const IGNORED_HOST_IDS = new Set(["reco-ext-host", "reco-draw-host", "reco-chat-host"]);
-const MAX_ELEMENTS = 90;
+const MAX_ELEMENTS = 100;
 
 const INTERACTIVE_SELECTOR = [
   "a[href]",
   "button",
+  "label",
   "input:not([type='hidden'])",
   "textarea",
   "select",
@@ -47,6 +48,9 @@ const INTERACTIVE_SELECTOR = [
   "[role='switch']",
   "[role='row']",
   "[role='listitem']",
+  "[onclick]",
+  "[data-theme]",
+  "[data-color]",
   "summary",
   "img",
   "h1",
@@ -222,20 +226,70 @@ function getViewportRect(el: HTMLElement): DOMRect {
 }
 
 function isVisibleInViewport(el: HTMLElement): boolean {
+  const rect = getViewportRect(el);
+  if (rect.width < 6 || rect.height < 6) return false;
+  const margin = 120;
+  if (
+    rect.bottom < -margin ||
+    rect.right < -margin ||
+    rect.top > window.innerHeight + margin ||
+    rect.left > window.innerWidth + margin
+  ) {
+    return false;
+  }
   const win = el.ownerDocument?.defaultView ?? window;
   const style = win.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) {
     return false;
   }
-  const rect = getViewportRect(el);
-  if (rect.width < 6 || rect.height < 6) return false;
-  const margin = 120;
-  return (
-    rect.bottom >= -margin &&
-    rect.right >= -margin &&
-    rect.top <= window.innerHeight + margin &&
-    rect.left <= window.innerWidth + margin
-  );
+  return true;
+}
+
+function describeColor(bg: string): string {
+  const m = bg.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)/i);
+  if (!m) return "";
+  const r = Number(m[1]);
+  const g = Number(m[2]);
+  const b = Number(m[3]);
+  const a = m[4] !== undefined ? Number(m[4]) : 1;
+  if (a < 0.2) return "";
+  if (r < 42 && g < 42 && b < 42) return "negro";
+  if (r > 238 && g > 238 && b > 238) return "blanco";
+  if (Math.abs(r - g) < 18 && Math.abs(g - b) < 18) {
+    return r < 120 ? "gris oscuro" : "gris";
+  }
+  if (r > 215 && g > 195 && b > 140 && b < 225) return "beige";
+  if (r > 180 && g > 150 && b < 110) return "amarillo";
+  if (r > 180 && g < 110 && b < 110) return "rojo";
+  if (g > 140 && r < 120 && b < 130) return "verde";
+  if (b > 150 && r < 120) return "azul";
+  if (r > 120 && b > 140 && g < 120) return "morado";
+  return `rgb(${r},${g},${b})`;
+}
+
+function getNearbyContextLabel(el: HTMLElement): string {
+  let cur: HTMLElement | null = el.parentElement;
+  for (let depth = 0; cur && depth < 2; depth += 1) {
+    const directText = Array.from(cur.childNodes)
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent || "")
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (directText && directText.length <= 28) return directText;
+    const prev = cur.previousElementSibling;
+    if (prev && prev instanceof HTMLElement) {
+      const pt = cleanSnippet(prev.innerText || prev.textContent, 24);
+      if (pt) return pt;
+    }
+    cur = cur.parentElement;
+  }
+  const prevSib = el.previousElementSibling;
+  if (prevSib && prevSib instanceof HTMLElement) {
+    const pt = cleanSnippet(prevSib.innerText || prevSib.textContent, 24);
+    if (pt) return pt;
+  }
+  return "";
 }
 
 function getElementLabel(el: HTMLElement): string {
@@ -298,6 +352,44 @@ function getElementLabel(el: HTMLElement): string {
   const alt = el.querySelector("img[alt]")?.getAttribute("alt");
   if (alt?.trim()) return cleanSnippet(alt);
 
+  const dataHint =
+    el.getAttribute("data-tooltip") ||
+    el.getAttribute("data-theme") ||
+    el.getAttribute("data-color") ||
+    el.getAttribute("data-action") ||
+    el.getAttribute("data-bs-original-title");
+  if (dataHint?.trim()) return cleanSnippet(dataHint);
+
+  // Color swatch or icon-only clickable control: synthesize label from nearby context + color/id/class
+  const rect = getViewportRect(el);
+  const win = el.ownerDocument?.defaultView ?? window;
+  const style = win.getComputedStyle(el);
+  const colorName = rect.width <= 64 && rect.height <= 64 ? describeColor(style.backgroundColor) : "";
+  const nearby = getNearbyContextLabel(el);
+
+  if (colorName) {
+    return nearby ? cleanSnippet(`${nearby} ${colorName}`) : `color ${colorName}`;
+  }
+
+  const semanticAttr = `${el.id || ""} ${typeof el.className === "string" ? el.className : ""}`.trim();
+  if (semanticAttr) {
+    const useful = semanticAttr
+      .split(/[\s_-]+/)
+      .filter((w) =>
+        /^(dark|black|light|white|beige|sepia|theme|format|toggle|switch|bold|italic|underline|copy|download|delete|trash|clear|print|search|fullscreen|undo|redo|save|close|menu|sidebar|setting)$/i.test(
+          w,
+        ),
+      );
+    if (useful.length > 0) {
+      const hint = useful.slice(0, 2).join(" ");
+      return nearby ? cleanSnippet(`${nearby} ${hint}`) : hint;
+    }
+  }
+
+  if (nearby && (el.querySelector("input[type='checkbox']") || style.cursor === "pointer")) {
+    return cleanSnippet(nearby);
+  }
+
   return "";
 }
 
@@ -306,6 +398,7 @@ function getElementKind(el: HTMLElement): string {
   const role = el.getAttribute("role");
   if (tag === "img") return "img";
   if (tag === "h1" || tag === "h2" || tag === "h3") return "heading";
+  if (tag === "label" && el.querySelector("input[type='checkbox']")) return "switch";
   if (tag === "input") {
     const type = (el as HTMLInputElement).type || "text";
     return `input(${type})`;
@@ -316,7 +409,7 @@ function getElementKind(el: HTMLElement): string {
   if (tag === "a") return "link";
   if (tag === "button") return "button";
   if (role) return role;
-  return tag;
+  return "control";
 }
 
 function collectCandidates(root: Document | ShadowRoot, out: HTMLElement[]) {
@@ -335,9 +428,15 @@ function collectCandidates(root: Document | ShadowRoot, out: HTMLElement[]) {
     out.push(node);
   }
 
-  // Traverse open shadow roots & same-origin iframes (TinyMCE, CKEditor, etc.)
+  // Fast single-pass scan for shadow roots, same-origin iframes, and compact cursor:pointer controls
+  // (catches custom theme swatches, toggle switches, icon buttons without semantic <button> tags)
+  const seenLocal = new Set<Element>(out);
   const all = root.querySelectorAll("*");
+  const vh = window.innerHeight;
+  const vw = window.innerWidth;
+
   for (const el of all) {
+    if (!(el instanceof HTMLElement)) continue;
     if (IGNORED_HOST_IDS.has(el.id)) continue;
     if (el.shadowRoot) {
       collectCandidates(el.shadowRoot, out);
@@ -348,6 +447,24 @@ function collectCandidates(root: Document | ShadowRoot, out: HTMLElement[]) {
       } catch {
         // cross-origin iframe
       }
+      continue;
+    }
+    if (seenLocal.has(el)) continue;
+    const tag = el.tagName;
+    if (tag !== "DIV" && tag !== "SPAN" && tag !== "LI" && tag !== "I") continue;
+    if (el.closest("#reco-ext-host, #reco-draw-host, #reco-chat-host")) continue;
+
+    // Cheap rect pre-filter BEFORE getComputedStyle to keep snapshot <15ms
+    const r = el.getBoundingClientRect();
+    if (r.width < 12 || r.width > 180 || r.height < 12 || r.height > 56) continue;
+    if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+
+    const win = el.ownerDocument?.defaultView ?? window;
+    if (win.getComputedStyle(el).cursor === "pointer") {
+      // Avoid duplicating if an ancestor is already a button/a/label in out
+      if (el.closest("button, a[href], label, [role='button']")) continue;
+      seenLocal.add(el);
+      out.push(el);
     }
   }
 }
@@ -422,9 +539,19 @@ export function capturePageSnapshot(): PageSnapshotResult {
       }
 
       const focusMark = el === active ? " (foco)" : "";
+      const cb =
+        el instanceof HTMLInputElement && el.type === "checkbox"
+          ? el
+          : el.tagName === "LABEL"
+            ? el.querySelector<HTMLInputElement>("input[type='checkbox']")
+            : null;
+      const checkMark = cb ? (cb.checked ? " [ON]" : " [OFF]") : "";
+      const r = getViewportRect(el);
+      const xPct = Math.round(((r.left + r.width / 2) / Math.max(1, window.innerWidth)) * 100);
+      const yPct = Math.round(((r.top + r.height / 2) / Math.max(1, window.innerHeight)) * 100);
       const id = nextId++;
       indexedElements.set(id, el);
-      lines.push(`[${id}] ${kind} "${label || "sin etiqueta"}"${valSnippet}${focusMark}`);
+      lines.push(`[${id}] ${kind} "${label || "sin etiqueta"}"${valSnippet}${checkMark}${focusMark} @${xPct}%,${yPct}%`);
     }
 
     const header = `[Página activa: "${cleanSnippet(document.title, 80)}" (${location.href})]`;
@@ -594,13 +721,30 @@ function clickElement(el: HTMLElement) {
   const rect = el.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
-  const common = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+  const win = el.ownerDocument?.defaultView ?? window;
+  const common = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: win };
+
+  // Track associated checkbox (for <label> or custom toggle wrappers) to guarantee toggle fires
+  const associatedCheckbox: HTMLInputElement | null =
+    el instanceof HTMLInputElement && el.type === "checkbox"
+      ? el
+      : el instanceof HTMLLabelElement && el.control instanceof HTMLInputElement && el.control.type === "checkbox"
+        ? el.control
+        : el.querySelector<HTMLInputElement>("input[type='checkbox']");
+  const prevChecked = associatedCheckbox?.checked;
+
   el.dispatchEvent(new PointerEvent("pointerdown", common));
   el.dispatchEvent(new MouseEvent("mousedown", common));
   el.focus?.();
   el.dispatchEvent(new PointerEvent("pointerup", common));
   el.dispatchEvent(new MouseEvent("mouseup", common));
   el.click();
+
+  if (associatedCheckbox && associatedCheckbox.checked === prevChecked) {
+    associatedCheckbox.checked = !prevChecked;
+    associatedCheckbox.dispatchEvent(new Event("input", { bubbles: true }));
+    associatedCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+  }
 }
 
 export async function performPageAction(action: PageActionPayload): Promise<PageActionResult> {
@@ -610,6 +754,19 @@ export async function performPageAction(action: PageActionPayload): Promise<Page
       if (!el) return { ok: false, error: `No encontré el elemento "${action.target}".` };
       clickElement(el);
       return { ok: true, detail: `Clic en "${getElementLabel(el) || action.target}"` };
+    }
+
+    if (action.kind === "click_xy") {
+      const x = Math.round((Math.max(0, Math.min(100, action.xPct)) / 100) * window.innerWidth);
+      const y = Math.round((Math.max(0, Math.min(100, action.yPct)) / 100) * window.innerHeight);
+      const hit = document.elementFromPoint(x, y);
+      if (!(hit instanceof HTMLElement)) {
+        return { ok: false, error: `No hay elemento en (${action.xPct}%, ${action.yPct}%).` };
+      }
+      const target =
+        hit.closest<HTMLElement>("button, a[href], label, input, [role='button'], [onclick]") ?? hit;
+      clickElement(target);
+      return { ok: true, detail: `Clic en (${action.xPct}%, ${action.yPct}%)` };
     }
 
     if (action.kind === "type") {
