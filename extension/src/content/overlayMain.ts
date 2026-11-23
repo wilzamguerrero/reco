@@ -1001,9 +1001,8 @@ function runOverlay() {
 
     fabGroupEl.classList.toggle("is-open", menuOpen && idle);
 
-    const activeToast = currentState?.aiVoiceStatus || currentState?.dictationStatus || toastText;
-    if (activeToast) {
-      toastEl.textContent = activeToast;
+    if (toastText) {
+      toastEl.textContent = toastText;
       toastEl.classList.add("is-visible");
     } else {
       toastEl.classList.remove("is-visible");
