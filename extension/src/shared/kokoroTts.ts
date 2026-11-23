@@ -1,13 +1,19 @@
 /**
  * Motor unificado de voz natural (TTS) para RECO:
- *  - `kokoro`: Kokoro-82M local (WebGPU/WASM, voces verificadas de kokoro-js)
- *  - `piper`:  Piper TTS local (WASM/ONNX, voces neuronales en ESPAÑOL y caché OPFS)
- *  - `moss`:   MOSS-TTS-Nano (Hugging Face Space OpenMOSS-Team/MOSS-TTS-Nano)
- *  - `system`: Voces instaladas del sistema operativo (instantáneo)
- *  - `off`:    Solo texto
+ *  - `supertonic`: Supertonic-3 ONNX Web local (thuongvv/Supertonic-3-ONNX-Web, español nativo)
+ *  - `pocket`:     Pocket TTS local (vlapky/pocket-tts-js, español streaming + clonación de voz!)
+ *  - `piper`:      Piper TTS local (WASM/ONNX, voces neuronales en español y caché OPFS)
+ *  - `kokoro`:     Kokoro-82M local (WebGPU/WASM, voces verificadas de kokoro-js)
+ *  - `moss`:       MOSS-TTS-Nano (Hugging Face Space OpenMOSS-Team/MOSS-TTS-Nano)
+ *  - `system`:     Voces instaladas del sistema operativo (instantáneo)
+ *  - `off`:        Solo texto
  */
 
+import { getCustomVoicePcm } from "./storage";
+import { SUPERTONIC_VOICES, synthesizeSupertonicSentence } from "./supertonicTts";
 import type { TtsEngineMode } from "./types";
+
+export { SUPERTONIC_VOICES };
 
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const MOSS_SPACE_BASE = "https://openmoss-team-moss-tts-nano.hf.space";
@@ -16,6 +22,18 @@ export interface VoiceOption {
   id: string;
   label: string;
 }
+
+export const POCKET_VOICES: VoiceOption[] = [
+  { id: "__custom__", label: "★ Mi voz clonada (Custom)" },
+  { id: "alba", label: "Alba (ES)" },
+  { id: "azelma", label: "Azelma (ES)" },
+  { id: "cosette", label: "Cosette (ES)" },
+  { id: "eponine", label: "Éponine (ES)" },
+  { id: "fantine", label: "Fantine (ES)" },
+  { id: "javert", label: "Javert (ES)" },
+  { id: "jean", label: "Jean (ES)" },
+  { id: "marius", label: "Marius (ES)" },
+];
 
 export const KOKORO_VOICES: VoiceOption[] = [
   { id: "af_heart", label: "Heart (Mujer)" },
@@ -48,10 +66,113 @@ type KokoroInstance = {
 
 let kokoroPromise: Promise<KokoroInstance> | null = null;
 const piperSessions = new Map<string, Promise<{ predict(text: string): Promise<Blob> }>>();
+type PocketInstance = {
+  sampleRate: number;
+  load(onProgress?: (p: { label?: string; loaded?: number; total?: number; status?: string }) => void): Promise<unknown>;
+  loadVoice(name: string): Promise<string>;
+  cloneVoice(audio: Float32Array, opts?: { inputSampleRate?: number; name?: string }): Promise<string>;
+  generate(
+    text: string,
+    opts: { voice: string; onChunk?: (audio: Float32Array, meta?: unknown) => void },
+  ): Promise<unknown>;
+  stop(): Promise<void>;
+};
+type PocketPlayer = {
+  resume(): Promise<void>;
+  play(audio: Float32Array, meta?: unknown): void;
+  flush(): void;
+  stop(): void;
+};
+let pocketPromise: Promise<{ tts: PocketInstance; StreamingPlayer: new (opts: { sampleRate: number }) => PocketPlayer }> | null = null;
+let activePocketTts: PocketInstance | null = null;
+let activePocketPlayer: PocketPlayer | null = null;
+let cachedPocketCustomVoiceRef: string | null = null;
+const cachedPocketBuiltInVoices = new Map<string, string>();
 let activeCtx: AudioContext | null = null;
 let activeSource: AudioBufferSourceNode | null = null;
 let activeAudioEl: HTMLAudioElement | null = null;
+let activeAbort: AbortController | null = null;
 let speakSeq = 0;
+
+export function invalidateCustomPocketVoice(): void {
+  cachedPocketCustomVoiceRef = null;
+}
+
+async function loadPocket(onStatus?: (s: string | null) => void) {
+  if (pocketPromise) return pocketPromise;
+
+  pocketPromise = (async () => {
+    onStatus?.("Preparando Pocket TTS (español)…");
+    const mod = (await import("pocket-tts-js")) as unknown as {
+      PocketTTS: new (opts: Record<string, unknown>) => PocketInstance;
+      StreamingPlayer: new (opts: { sampleRate: number }) => PocketPlayer;
+    };
+    const tts = new mod.PocketTTS({
+      language: "spanish",
+      quantized: true,
+      voiceCloning: true,
+      ortBaseUrl: chrome.runtime.getURL("ort/"),
+      maxThreads: 1,
+      cache: true,
+    });
+    activePocketTts = tts;
+    await tts.load((p) => {
+      if (p.total && p.total > 0 && p.loaded !== undefined) {
+        const pct = Math.min(100, Math.round((p.loaded / p.total) * 100));
+        onStatus?.(`Pocket TTS · ${p.label || "modelo"} ${pct}%`);
+      } else if (p.status) {
+        onStatus?.(`Pocket TTS · ${p.status}…`);
+      }
+    });
+    onStatus?.(null);
+    return { tts, StreamingPlayer: mod.StreamingPlayer };
+  })();
+
+  try {
+    return await pocketPromise;
+  } catch (err) {
+    pocketPromise = null;
+    activePocketTts = null;
+    onStatus?.(null);
+    throw err;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(`Tiempo agotado (${label})`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+function makeTimedSignal(parent: AbortSignal | undefined, ms: number): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(new Error("Timeout")), ms);
+  const onParentAbort = () => ctrl.abort(parent?.reason);
+  if (parent) {
+    if (parent.aborted) ctrl.abort(parent.reason);
+    else parent.addEventListener("abort", onParentAbort, { once: true });
+  }
+  return {
+    signal: ctrl.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
 
 function stripMarkdownForSpeech(raw: string): string {
   return raw
@@ -144,21 +265,37 @@ async function loadPiper(
   const loader = (async () => {
     onStatus?.(`Preparando Piper (${validVoice})…`);
     const piper = await import("@mintplex-labs/piper-tts-web");
-    const defaults = piper.TtsSession.WASM_LOCATIONS;
-    const session = await piper.TtsSession.create({
-      voiceId: validVoice,
-      wasmPaths: {
-        onnxWasm: chrome.runtime.getURL("ort/"),
-        piperData: defaults.piperData,
-        piperWasm: defaults.piperWasm,
-      },
-      progress: (p) => {
-        if (p.total > 0) {
-          const pct = Math.min(100, Math.round((p.loaded / p.total) * 100));
-          onStatus?.(`Descargando voz Piper · ${pct}%`);
-        }
-      },
-    });
+    const localOrt = chrome.runtime.getURL("ort/");
+
+    // Workaround for piper-tts-web@1.0.5 bug: constructor calls this.init() BEFORE
+    // setting private #wasmPaths, so we must patch TtsSession.WASM_LOCATIONS first
+    // AND clear the static _instance singleton when switching voices.
+    const TtsSessionAny = piper.TtsSession as unknown as {
+      WASM_LOCATIONS: { onnxWasm: string; piperData: string; piperWasm: string };
+      _instance: unknown;
+    };
+    TtsSessionAny.WASM_LOCATIONS.onnxWasm = localOrt;
+    TtsSessionAny._instance = null;
+
+    const defaults = TtsSessionAny.WASM_LOCATIONS;
+    const session = await withTimeout(
+      piper.TtsSession.create({
+        voiceId: validVoice,
+        wasmPaths: {
+          onnxWasm: localOrt,
+          piperData: defaults.piperData,
+          piperWasm: defaults.piperWasm,
+        },
+        progress: (p) => {
+          if (p.total > 0) {
+            const pct = Math.min(100, Math.round((p.loaded / p.total) * 100));
+            onStatus?.(pct >= 100 ? "Inicializando voz Piper…" : `Descargando voz Piper · ${pct}%`);
+          }
+        },
+      }),
+      35_000,
+      "Piper init",
+    );
     onStatus?.(null);
     return session;
   })();
@@ -175,15 +312,22 @@ async function loadPiper(
 
 async function synthesizeMossAudioUrl(
   text: string,
+  parentSignal: AbortSignal | undefined,
   onStatus?: (s: string | null) => void,
 ): Promise<string> {
   onStatus?.("Sintetizando con MOSS-TTS-Nano…");
-  // Discover endpoint from Gradio Space API
-  const infoRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/info`);
-  if (!infoRes.ok) throw new Error(`MOSS Space HTTP ${infoRes.status}`);
-  const info = (await infoRes.json()) as {
-    named_endpoints?: Record<string, { parameters?: Array<{ parameter_name?: string }> }>;
-  };
+
+  const timedInfo = makeTimedSignal(parentSignal, 10_000);
+  let info: { named_endpoints?: Record<string, { parameters?: Array<{ parameter_name?: string }> }> };
+  try {
+    const infoRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/info`, {
+      signal: timedInfo.signal,
+    });
+    if (!infoRes.ok) throw new Error(`MOSS Space HTTP ${infoRes.status}`);
+    info = (await infoRes.json()) as typeof info;
+  } finally {
+    timedInfo.cleanup();
+  }
 
   const endpoints = Object.keys(info.named_endpoints ?? {});
   const ep =
@@ -194,22 +338,42 @@ async function synthesizeMossAudioUrl(
   const params = info.named_endpoints?.[ep]?.parameters ?? [];
   const dataPayload = params.length <= 1 ? [text] : [text, ...params.slice(1).map(() => null)];
 
-  const callRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/${epClean}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data: dataPayload }),
-  });
-  if (!callRes.ok) throw new Error(`MOSS call HTTP ${callRes.status}`);
-  const { event_id } = (await callRes.json()) as { event_id?: string };
-  if (!event_id) throw new Error("MOSS no devolvió event_id");
+  const timedCall = makeTimedSignal(parentSignal, 10_000);
+  let eventId = "";
+  try {
+    const callRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/${epClean}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: dataPayload }),
+      signal: timedCall.signal,
+    });
+    if (!callRes.ok) throw new Error(`MOSS call HTTP ${callRes.status}`);
+    const payload = (await callRes.json()) as { event_id?: string };
+    eventId = payload.event_id ?? "";
+  } finally {
+    timedCall.cleanup();
+  }
+  if (!eventId) throw new Error("MOSS no devolvió event_id");
 
-  const sseRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/${epClean}/${event_id}`);
-  if (!sseRes.ok) throw new Error(`MOSS stream HTTP ${sseRes.status}`);
-  const bodyText = await sseRes.text();
+  const timedSse = makeTimedSignal(parentSignal, 14_000);
+  let bodyText = "";
+  try {
+    const sseRes = await fetch(`${MOSS_SPACE_BASE}/gradio_api/call/${epClean}/${eventId}`, {
+      signal: timedSse.signal,
+    });
+    if (!sseRes.ok) throw new Error(`MOSS stream HTTP ${sseRes.status}`);
+    bodyText = await sseRes.text();
+  } finally {
+    timedSse.cleanup();
+  }
+
+  if (/\bevent:\s*error\b/i.test(bodyText)) {
+    throw new Error("MOSS Space devolvió error");
+  }
   const dataLine = bodyText
     .split("\n")
     .reverse()
-    .find((l) => l.startsWith("data:"));
+    .find((l) => l.startsWith("data:") && l.slice(5).trim() !== "null");
   if (!dataLine) throw new Error("MOSS no devolvió audio");
 
   const parsed = JSON.parse(dataLine.slice(5).trim()) as unknown[];
@@ -225,6 +389,21 @@ async function synthesizeMossAudioUrl(
 
 export function stopSpeaking(): void {
   speakSeq += 1;
+  try {
+    activeAbort?.abort();
+  } catch {
+    // ignore
+  }
+  activeAbort = null;
+  try {
+    activePocketPlayer?.stop();
+  } catch {
+    // ignore
+  }
+  activePocketPlayer = null;
+  if (activePocketTts) {
+    void activePocketTts.stop().catch(() => {});
+  }
   try {
     activeSource?.stop();
   } catch {
@@ -299,7 +478,7 @@ export function getSystemVoices(): VoiceOption[] {
   }));
 }
 
-function speakSystem(text: string, voiceUri?: string): Promise<void> {
+function speakSystem(text: string, voiceUri?: string, speed?: number): Promise<void> {
   return new Promise((resolve) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       resolve();
@@ -317,7 +496,7 @@ function speakSystem(text: string, voiceUri?: string): Promise<void> {
     } else {
       u.lang = "es-ES";
     }
-    u.rate = 1.04;
+    u.rate = Math.max(0.75, Math.min(1.4, speed ?? 1.05));
     u.onend = () => resolve();
     u.onerror = () => resolve();
     window.speechSynthesis.speak(u);
@@ -328,6 +507,7 @@ export async function speakReply(opts: {
   text: string;
   mode: TtsEngineMode;
   voice: string;
+  speed?: number;
   onStatus?: (status: string | null) => void;
 }): Promise<void> {
   if (opts.mode === "off") return;
@@ -336,10 +516,111 @@ export async function speakReply(opts: {
 
   stopSpeaking();
   const seq = speakSeq;
+  const localAbort = new AbortController();
+  activeAbort = localAbort;
+  const speed = Math.max(0.75, Math.min(1.4, opts.speed ?? 1.05));
 
   if (opts.mode === "system") {
-    await speakSystem(clean, opts.voice);
+    await speakSystem(clean, opts.voice, speed);
     return;
+  }
+
+  if (opts.mode === "supertonic") {
+    try {
+      const sentences = splitIntoSentences(clean);
+      for (const sentence of sentences) {
+        if (seq !== speakSeq) break;
+        const { audio, sampleRate } = await synthesizeSupertonicSentence({
+          text: sentence,
+          voice: opts.voice,
+          speed,
+          steps: 5,
+          onStatus: opts.onStatus,
+        });
+        if (seq !== speakSeq) break;
+        opts.onStatus?.(null);
+        await playPcm(audio, sampleRate, seq);
+      }
+      opts.onStatus?.(null);
+      return;
+    } catch (err) {
+      if (seq !== speakSeq) {
+        opts.onStatus?.(null);
+        return;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      opts.onStatus?.(`Supertonic respaldo voz sistema (${msg.slice(0, 44)})`);
+      window.setTimeout(() => opts.onStatus?.(null), 2600);
+      if (seq === speakSeq) await speakSystem(clean, undefined, speed);
+      return;
+    }
+  }
+
+  if (opts.mode === "pocket") {
+    try {
+      const { tts, StreamingPlayer } = await loadPocket(opts.onStatus);
+      if (seq !== speakSeq) return;
+
+      let voiceRef: string;
+      if (opts.voice === "__custom__") {
+        if (cachedPocketCustomVoiceRef) {
+          voiceRef = cachedPocketCustomVoiceRef;
+        } else {
+          const saved = await getCustomVoicePcm();
+          if (saved) {
+            opts.onStatus?.(`Clonando voz (${saved.name})…`);
+            voiceRef = await tts.cloneVoice(saved.pcm, {
+              inputSampleRate: saved.sampleRate,
+              name: "reco_custom",
+            });
+            cachedPocketCustomVoiceRef = voiceRef;
+          } else {
+            const fallback = "alba";
+            voiceRef =
+              cachedPocketBuiltInVoices.get(fallback) ?? (await tts.loadVoice(fallback));
+            cachedPocketBuiltInVoices.set(fallback, voiceRef);
+          }
+        }
+      } else {
+        const chosen = POCKET_VOICES.some((v) => v.id === opts.voice && v.id !== "__custom__")
+          ? opts.voice
+          : "alba";
+        voiceRef =
+          cachedPocketBuiltInVoices.get(chosen) ?? (await tts.loadVoice(chosen));
+        cachedPocketBuiltInVoices.set(chosen, voiceRef);
+      }
+
+      if (seq !== speakSeq) return;
+      opts.onStatus?.(null);
+
+      const player = new StreamingPlayer({ sampleRate: tts.sampleRate });
+      activePocketPlayer = player;
+      await player.resume();
+
+      await tts.generate(clean, {
+        voice: voiceRef,
+        onChunk: (audio, meta) => {
+          if (seq === speakSeq && activePocketPlayer === player) {
+            player.play(audio, meta);
+          }
+        },
+      });
+      if (seq === speakSeq && activePocketPlayer === player) {
+        player.flush();
+      }
+      opts.onStatus?.(null);
+      return;
+    } catch (err) {
+      if (seq !== speakSeq) {
+        opts.onStatus?.(null);
+        return;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      opts.onStatus?.(`Pocket respaldo voz sistema (${msg.slice(0, 44)})`);
+      window.setTimeout(() => opts.onStatus?.(null), 2600);
+      if (seq === speakSeq) await speakSystem(clean, undefined, speed);
+      return;
+    }
   }
 
   if (opts.mode === "piper") {
@@ -349,14 +630,19 @@ export async function speakReply(opts: {
       const sentences = splitIntoSentences(clean);
       for (const sentence of sentences) {
         if (seq !== speakSeq) break;
-        const blob = await session.predict(sentence);
+        const blob = await withTimeout(session.predict(sentence), 15_000, "Piper voz");
         if (seq !== speakSeq) break;
         await playAudioUrl(URL.createObjectURL(blob), true, seq);
       }
+      opts.onStatus?.(null);
       return;
     } catch (err) {
+      if (seq !== speakSeq) {
+        opts.onStatus?.(null);
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      opts.onStatus?.(`Piper respaldo voz sistema (${msg.slice(0, 50)})`);
+      opts.onStatus?.(`Piper respaldo voz sistema (${msg.slice(0, 48)})`);
       window.setTimeout(() => opts.onStatus?.(null), 2400);
       if (seq === speakSeq) await speakSystem(clean);
       return;
@@ -365,13 +651,18 @@ export async function speakReply(opts: {
 
   if (opts.mode === "moss") {
     try {
-      const url = await synthesizeMossAudioUrl(clean.slice(0, 450), opts.onStatus);
+      const url = await synthesizeMossAudioUrl(clean.slice(0, 450), localAbort.signal, opts.onStatus);
       if (seq !== speakSeq) return;
       await playAudioUrl(url, false, seq);
+      opts.onStatus?.(null);
       return;
     } catch (err) {
+      if (seq !== speakSeq) {
+        opts.onStatus?.(null);
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      opts.onStatus?.(`MOSS ocupado, usando respaldo (${msg.slice(0, 45)})`);
+      opts.onStatus?.(`MOSS ocupado, usando respaldo (${msg.slice(0, 44)})`);
       window.setTimeout(() => opts.onStatus?.(null), 2400);
       if (seq === speakSeq) await speakSystem(clean);
       return;
@@ -391,7 +682,7 @@ export async function speakReply(opts: {
       if (seq !== speakSeq) break;
       const result = await tts.generate(sentence, {
         voice: validVoice,
-        speed: 1.02,
+        speed,
       });
       if (seq !== speakSeq) break;
       await playPcm(result.audio, result.sampling_rate, seq);

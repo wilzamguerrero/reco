@@ -33,6 +33,7 @@ function BridgeApp() {
     let pendingTranscript = "";
     let turnTimer: number | null = null;
     let abortCtrl: AbortController | null = null;
+    let bargeStop: (() => void) | null = null;
 
     const sendAiPhase = (phase: "idle" | "listening" | "thinking" | "speaking", st?: string | null) => {
       void chrome.runtime.sendMessage({
@@ -41,6 +42,81 @@ function BridgeApp() {
         status: st,
       } satisfies ExtMessage);
     };
+
+    /**
+     * Monitor ligero de interrupción natural (barge-in):
+     * Mientras RECO está hablando, escucha el micrófono con cancelación de eco
+     * del navegador (`echoCancellation: true`). Si el usuario empieza a hablar
+     * (~200ms por encima del umbral), detiene la voz de RECO al instante para
+     * escuchar lo nuevo como una conversación natural.
+     */
+    function startBargeInMonitor(onInterrupt: () => void): () => void {
+      let stopped = false;
+      let stream: MediaStream | null = null;
+      let ctx: AudioContext | null = null;
+      let timer: number | null = null;
+
+      const cleanup = () => {
+        if (stopped) return;
+        stopped = true;
+        if (timer !== null) clearInterval(timer);
+        timer = null;
+        stream?.getTracks().forEach((t) => t.stop());
+        stream = null;
+        if (ctx) {
+          void ctx.close().catch(() => {});
+          ctx = null;
+        }
+      };
+
+      void navigator.mediaDevices
+        .getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        })
+        .then((s) => {
+          if (stopped) {
+            s.getTracks().forEach((t) => t.stop());
+            return;
+          }
+          stream = s;
+          ctx = new AudioContext();
+          const source = ctx.createMediaStreamSource(s);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          source.connect(analyser);
+          const data = new Float32Array(analyser.fftSize);
+          const startedAt = performance.now();
+          let hotFrames = 0;
+
+          timer = window.setInterval(() => {
+            if (stopped) return;
+            // Grace period so initial TTS audio doesn't false-trigger
+            if (performance.now() - startedAt < 400) return;
+            analyser.getFloatTimeDomainData(data);
+            let sum = 0;
+            for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+            const level = Math.sqrt(sum / data.length);
+            if (level > 0.058) {
+              hotFrames += 1;
+              if (hotFrames >= 4) {
+                cleanup();
+                onInterrupt();
+              }
+            } else {
+              hotFrames = Math.max(0, hotFrames - 1);
+            }
+          }, 50);
+        })
+        .catch(() => {
+          // If mic cannot be opened concurrently, just skip barge-in silently
+        });
+
+      return cleanup;
+    }
 
     async function runAiVoiceTurn(spokenText: string) {
       if (disposed || aiBusy || !spokenText.trim()) return;
@@ -51,6 +127,7 @@ function BridgeApp() {
       sendAiPhase("thinking", "RECO pensando…");
 
       abortCtrl = new AbortController();
+      let interrupted = false;
       try {
         const cfg = await getConfig();
         const res = await runRecoAgentTurn({
@@ -61,19 +138,32 @@ function BridgeApp() {
 
         setLastLine(res.text);
         if (res.text && cfg.ai.ttsMode !== "off") {
-          setStatus("Respondiendo por voz…");
+          setStatus("Respondiendo por voz… (habla para interrumpir)");
           sendAiPhase("speaking", null);
-          await speakReply({
-            text: res.text,
-            mode: cfg.ai.ttsMode,
-            voice: cfg.ai.ttsVoice,
-            onStatus(s) {
-              if (s) {
-                setStatus(s);
-                sendAiPhase("speaking", s);
-              }
-            },
+
+          bargeStop?.();
+          bargeStop = startBargeInMonitor(() => {
+            interrupted = true;
+            stopSpeaking();
+            abortCtrl?.abort();
           });
+
+          try {
+            await speakReply({
+              text: res.text,
+              mode: cfg.ai.ttsMode,
+              voice: cfg.ai.ttsVoice,
+              speed: cfg.ai.ttsSpeed,
+              onStatus(s) {
+                if (interrupted || disposed) return;
+                setStatus(s || "Respondiendo por voz…");
+                sendAiPhase("speaking", s);
+              },
+            });
+          } finally {
+            bargeStop?.();
+            bargeStop = null;
+          }
         }
       } catch (err) {
         if (!(err instanceof DOMException && err.name === "AbortError")) {
@@ -86,9 +176,11 @@ function BridgeApp() {
           } satisfies ExtMessage);
         }
       } finally {
+        bargeStop?.();
+        bargeStop = null;
         aiBusy = false;
         if (!disposed) {
-          setStatus("Escuchando… habla con RECO IA");
+          setStatus(interrupted ? "Te escucho…" : "Escuchando… habla con RECO IA");
           sendAiPhase("listening", null);
           void engine?.start().catch(() => {});
         }
@@ -246,6 +338,8 @@ function BridgeApp() {
       } else if (msg.type === "AI_VOICE_STOP" && IS_AI_MODE) {
         disposed = true;
         if (turnTimer !== null) clearTimeout(turnTimer);
+        bargeStop?.();
+        bargeStop = null;
         abortCtrl?.abort();
         stopSpeaking();
         engine?.stop();
@@ -264,6 +358,8 @@ function BridgeApp() {
     return () => {
       disposed = true;
       if (turnTimer !== null) clearTimeout(turnTimer);
+      bargeStop?.();
+      bargeStop = null;
       abortCtrl?.abort();
       stopSpeaking();
       chrome.runtime.onMessage.removeListener(listener);

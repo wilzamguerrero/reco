@@ -10,12 +10,15 @@
 
 import {
   AI_PROVIDERS,
+  fetchProviderModels,
   streamProviderChat,
   type ChatMessagePart,
   type FreePiChatMessage,
+  type FreePiModel,
 } from "./freepiClient";
 import { getChatMessages, getConfig, patchConfig, saveChatMessages } from "./storage";
 import type {
+  AiProviderId,
   AppConfig,
   ExtMessage,
   PersistedChatAttachment,
@@ -25,7 +28,42 @@ import type {
 } from "./types";
 
 const VISION_INTENT_RE =
-  /\b(mira|míra|mirar|observa|qué ves|que ves|ves esto|revisa mi pantalla|en mi pantalla|en esta página|en esta pagina|estoy haciendo|estoy viendo|analiza esto|mira esto|captura)\b/i;
+  /\b(mira|míra|mirar|observa|ver|ves|veo|viendo|puedes ver|qué ves|que ves|qué hay|que hay|revisa|pantalla|página|pagina|estoy haciendo|hago|estoy viendo|dibuj\w*|trazo|trazos|pizarra|bosquejo|esquema|analiza esto|mira esto|captura|imagen|foto|aquí|aqui|esto que)\b/i;
+
+const catalogCache = new Map<string, { at: number; models: FreePiModel[] }>();
+
+async function resolveVisionModel(
+  provider: AiProviderId,
+  key: string,
+  customBaseUrl: string | undefined,
+  currentModel: string,
+): Promise<string> {
+  if (/gpt-4o|gpt-4\.1|claude-3|claude-sonnet|claude-opus|gemini|vision|vl|pixtral|llama-3\.2-.*vision|qwen.*vl/i.test(currentModel)) {
+    return currentModel;
+  }
+
+  const cacheKey = `${provider}:${customBaseUrl ?? ""}`;
+  let models: FreePiModel[] = [];
+  const cached = catalogCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 5 * 60_000) {
+    models = cached.models;
+  } else {
+    models = await fetchProviderModels({ provider, key, customBaseUrl }).catch(() => []);
+    if (models.length > 0) {
+      catalogCache.set(cacheKey, { at: Date.now(), models });
+    }
+  }
+
+  const activeEntry = models.find((m) => m.id === currentModel);
+  if (activeEntry?.vision) return currentModel;
+
+  const visionFree = models.find((m) => m.vision && m.free);
+  if (visionFree) return visionFree.id;
+  const visionAny = models.find((m) => m.vision);
+  if (visionAny) return visionAny.id;
+
+  return currentModel;
+}
 
 export function buildRecoSystemPrompt(cfg: AppConfig): string {
   return (
@@ -42,11 +80,11 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:CLOSE_DRAW]] -> cerrar pizarra de dibujo\n" +
     "- [[ACTION:START_DICTATION]] -> activar dictado normal en el cursor\n" +
     "- [[ACTION:SET_SPEECH_ENGINE|chrome]] o whisper_tiny o whisper_base -> cambiar motor de dictado\n" +
-    "- [[ACTION:SET_TTS|kokoro]] o piper o moss o system o off -> cambiar voz de respuesta\n" +
+    "- [[ACTION:SET_TTS|supertonic]] o pocket o piper o kokoro o moss o system o off -> cambiar voz de respuesta\n" +
     "- [[ACTION:SET_AI_MODEL|<id_modelo>]] -> cambiar modelo de IA\n" +
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
-    "Si recibes una captura de pantalla del usuario, descríbela o ayúdalo directamente con lo que está haciendo."
+    "SÍ tienes visión: cuando el usuario te pregunta si puedes ver lo que hace, su pantalla o lo que dibuja en la pizarra, el sistema adjunta automáticamente una captura real de su pantalla (incluidos sus dibujos). Descríbela directamente y ayúdalo con naturalidad."
   );
 }
 
@@ -91,7 +129,16 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       const next = await patchConfig({ dictation: { ...cfg.dictation, engine: arg as SpeechEngineType } });
       await chrome.runtime.sendMessage({ type: "CONFIG_UPDATED", config: next } satisfies ExtMessage).catch(() => {});
       executed.push(`dictado: ${arg}`);
-    } else if (cmd === "SET_TTS" && (arg === "kokoro" || arg === "piper" || arg === "moss" || arg === "system" || arg === "off")) {
+    } else if (
+      cmd === "SET_TTS" &&
+      (arg === "supertonic" ||
+        arg === "pocket" ||
+        arg === "kokoro" ||
+        arg === "piper" ||
+        arg === "moss" ||
+        arg === "system" ||
+        arg === "off")
+    ) {
       const cfg = await getConfig();
       const next = await patchConfig({ ai: { ...cfg.ai, ttsMode: arg as TtsEngineMode } });
       await chrome.runtime.sendMessage({ type: "CONFIG_UPDATED", config: next } satisfies ExtMessage).catch(() => {});
@@ -191,11 +238,16 @@ export async function runRecoAgentTurn(opts: {
   let rawText = "";
   let reasoningText = "";
 
+  const hasImageInTurn = atts.some((a) => a.kind === "image" && a.dataUrl);
+  const effectiveModel = hasImageInTurn
+    ? await resolveVisionModel(provider, key, cfg.ai.customBaseUrl, model)
+    : model;
+
   const result = await streamProviderChat({
     provider,
     key,
     customBaseUrl: cfg.ai.customBaseUrl,
-    model,
+    model: effectiveModel,
     messages: wireMessages,
     signal: opts.signal,
     onDelta(chunk) {

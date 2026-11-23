@@ -79,7 +79,14 @@ export type AiProviderId =
   | "nvidia"
   | "custom";
 
-export type TtsEngineMode = "kokoro" | "piper" | "moss" | "system" | "off";
+export type TtsEngineMode =
+  | "supertonic"
+  | "pocket"
+  | "piper"
+  | "kokoro"
+  | "moss"
+  | "system"
+  | "off";
 
 export type AiVoicePhase = "idle" | "listening" | "thinking" | "speaking";
 
@@ -93,6 +100,8 @@ export interface AiAssistantConfig {
   model: string;
   ttsMode: TtsEngineMode;
   ttsVoice: string;
+  ttsSpeed?: number;
+  customVoiceName?: string;
 }
 
 export interface PersistedChatAttachment {

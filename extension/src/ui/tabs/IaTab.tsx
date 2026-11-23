@@ -12,23 +12,53 @@ import {
 } from "../../shared/freepiClient";
 import {
   getSystemVoices,
+  invalidateCustomPocketVoice,
   KOKORO_VOICES,
   MOSS_VOICES,
   PIPER_VOICES,
+  POCKET_VOICES,
   speakReply,
   stopSpeaking,
+  SUPERTONIC_VOICES,
   type VoiceOption,
 } from "../../shared/kokoroTts";
+import { clearCustomVoicePcm, saveCustomVoicePcm } from "../../shared/storage";
 import type { AiProviderId, AppConfig, TtsEngineMode } from "../../shared/types";
 import { Icon } from "../components/Icon";
 
 const TTS_ENGINES: { id: TtsEngineMode; label: string; tip: string }[] = [
+  { id: "supertonic", label: "SUPERTONIC", tip: "Supertonic-3 ONNX Web local (español nativo, 10 voces)" },
+  { id: "pocket", label: "POCKET", tip: "Pocket TTS local (español streaming + clonación de voz)" },
   { id: "piper", label: "PIPER", tip: "Piper TTS local neuronal (español real, caché OPFS)" },
   { id: "kokoro", label: "KOKORO", tip: "Kokoro-82M local (WebGPU/WASM)" },
   { id: "moss", label: "MOSS", tip: "MOSS-TTS-Nano (Hugging Face Space)" },
   { id: "system", label: "VOZ", tip: "Voz del sistema (instantánea)" },
   { id: "off", label: "OFF", tip: "Solo texto" },
 ];
+
+async function decodeToMono24k(arrayBuffer: ArrayBuffer): Promise<Float32Array> {
+  const ctx = new AudioContext();
+  try {
+    const decoded = await ctx.decodeAudioData(arrayBuffer);
+    const src = decoded.getChannelData(0);
+    const targetRate = 24000;
+    if (decoded.sampleRate === targetRate) return new Float32Array(src);
+    const ratio = decoded.sampleRate / targetRate;
+    const outLen = Math.max(1, Math.floor(src.length / ratio));
+    const out = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const pos = i * ratio;
+      const idx = Math.floor(pos);
+      const frac = pos - idx;
+      const a = src[idx] ?? 0;
+      const b = src[Math.min(idx + 1, src.length - 1)] ?? a;
+      out[i] = a + (b - a) * frac;
+    }
+    return out;
+  } finally {
+    await ctx.close().catch(() => {});
+  }
+}
 
 export function IaTab({
   config,
@@ -52,7 +82,10 @@ export function IaTab({
   const [models, setModels] = useState<FreePiModel[]>([]);
   const [sysVoices, setSysVoices] = useState<VoiceOption[]>([]);
   const [ttsStatus, setTtsStatus] = useState<string | null>(null);
+  const [cloningBusy, setCloningBusy] = useState(false);
+  const [recordingSample, setRecordingSample] = useState(false);
   const loginAbortRef = useRef<AbortController | null>(null);
+  const voiceFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setKeyDraft(activeKey);
@@ -148,29 +181,100 @@ export function IaTab({
   }
 
   const voiceList: VoiceOption[] =
-    ai.ttsMode === "piper"
-      ? PIPER_VOICES
-      : ai.ttsMode === "kokoro"
-        ? KOKORO_VOICES
-        : ai.ttsMode === "moss"
-          ? MOSS_VOICES
-          : ai.ttsMode === "system"
-            ? sysVoices
-            : [];
+    ai.ttsMode === "supertonic"
+      ? SUPERTONIC_VOICES
+      : ai.ttsMode === "pocket"
+        ? POCKET_VOICES
+        : ai.ttsMode === "piper"
+          ? PIPER_VOICES
+          : ai.ttsMode === "kokoro"
+            ? KOKORO_VOICES
+            : ai.ttsMode === "moss"
+              ? MOSS_VOICES
+              : ai.ttsMode === "system"
+                ? sysVoices
+                : [];
 
   function switchTtsMode(next: TtsEngineMode) {
     stopSpeaking();
     const nextVoice =
-      next === "piper"
-        ? PIPER_VOICES[0].id
-        : next === "kokoro"
-          ? KOKORO_VOICES[0].id
-          : next === "moss"
-            ? MOSS_VOICES[0].id
-            : next === "system"
-              ? sysVoices[0]?.id ?? ""
-              : ai.ttsVoice;
+      next === "supertonic"
+        ? SUPERTONIC_VOICES[0].id
+        : next === "pocket"
+          ? ai.customVoiceName
+            ? "__custom__"
+            : "alba"
+          : next === "piper"
+            ? PIPER_VOICES[0].id
+            : next === "kokoro"
+              ? KOKORO_VOICES[0].id
+              : next === "moss"
+                ? MOSS_VOICES[0].id
+                : next === "system"
+                  ? sysVoices[0]?.id ?? ""
+                  : ai.ttsVoice;
     void updateConfig({ ai: { ...ai, ttsMode: next, ttsVoice: nextVoice } });
+  }
+
+  async function handleUploadVoiceSample(file: File) {
+    setCloningBusy(true);
+    setTtsStatus("Procesando muestra de voz…");
+    try {
+      const buf = await file.arrayBuffer();
+      const pcm24k = await decodeToMono24k(buf);
+      const label = file.name.replace(/\.[^.]+$/, "").slice(0, 22) || "Mi voz";
+      await saveCustomVoicePcm(pcm24k, label);
+      invalidateCustomPocketVoice();
+      await updateConfig({
+        ai: { ...ai, ttsMode: "pocket", ttsVoice: "__custom__", customVoiceName: label },
+      });
+      setTtsStatus(`Voz clonada guardada: ${label}`);
+      window.setTimeout(() => setTtsStatus(null), 2400);
+    } catch (err) {
+      setTtsStatus(`Error audio: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setCloningBusy(false);
+    }
+  }
+
+  async function handleRecordVoiceSample() {
+    if (recordingSample || cloningBusy) return;
+    setRecordingSample(true);
+    setTtsStatus("Grabando muestra de tu voz (5s)… habla natural");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      rec.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      const done = new Promise<Blob>((resolve) => {
+        rec.onstop = () => resolve(new Blob(chunks, { type: rec.mimeType || "audio/webm" }));
+      });
+      rec.start();
+      await new Promise((r) => window.setTimeout(r, 5000));
+      if (rec.state !== "inactive") rec.stop();
+      stream.getTracks().forEach((t) => t.stop());
+
+      setRecordingSample(false);
+      setCloningBusy(true);
+      setTtsStatus("Guardando tu voz clonada…");
+      const blob = await done;
+      const pcm24k = await decodeToMono24k(await blob.arrayBuffer());
+      const label = "Mi voz (mic)";
+      await saveCustomVoicePcm(pcm24k, label);
+      invalidateCustomPocketVoice();
+      await updateConfig({
+        ai: { ...ai, ttsMode: "pocket", ttsVoice: "__custom__", customVoiceName: label },
+      });
+      setTtsStatus("✓ Voz clonada lista para usar");
+      window.setTimeout(() => setTtsStatus(null), 2400);
+    } catch (err) {
+      setTtsStatus(`Micrófono: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setRecordingSample(false);
+      setCloningBusy(false);
+    }
   }
 
   return (
@@ -315,7 +419,9 @@ export function IaTab({
             >
               {voiceList.map((v) => (
                 <option key={v.id} value={v.id}>
-                  {v.label}
+                  {v.id === "__custom__" && ai.customVoiceName
+                    ? `★ ${ai.customVoiceName}`
+                    : v.label}
                 </option>
               ))}
             </select>
@@ -325,15 +431,110 @@ export function IaTab({
               title="Escuchar prueba de voz"
               onClick={() =>
                 void speakReply({
-                  text: "Hola, soy RECO. Así suena esta voz.",
+                  text: "Hola, soy RECO. Así suena esta voz en español.",
                   mode: ai.ttsMode,
                   voice: ai.ttsVoice,
+                  speed: ai.ttsSpeed,
                   onStatus: setTtsStatus,
                 })
               }
             >
               <Icon name="audio" size={12} /> Probar
             </button>
+          </div>
+        )}
+
+        {ai.ttsMode !== "off" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="pane-hint" style={{ minWidth: 62 }}>
+              Velocidad
+            </span>
+            <input
+              type="range"
+              min={0.85}
+              max={1.3}
+              step={0.05}
+              value={ai.ttsSpeed ?? 1.05}
+              style={{ flex: 1, accentColor: "var(--mint)" }}
+              onChange={(e) =>
+                void updateConfig({
+                  ai: { ...ai, ttsSpeed: Number.parseFloat(e.target.value) || 1.05 },
+                })
+              }
+            />
+            <span className="pane-hint" style={{ fontFamily: "var(--mono)", minWidth: 34, textAlign: "right" }}>
+              {(ai.ttsSpeed ?? 1.05).toFixed(2)}×
+            </span>
+          </div>
+        )}
+
+        {ai.ttsMode === "pocket" && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              padding: 7,
+              border: "1.5px solid var(--border-hi)",
+              background: "var(--bg-0)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+              <span className="pane-label" style={{ fontSize: 9.5 }}>
+                Personalizar / Clonar voz (Pocket)
+              </span>
+              {ai.customVoiceName && (
+                <button
+                  type="button"
+                  className="btn-xs"
+                  title="Eliminar voz clonada"
+                  onClick={() => {
+                    void clearCustomVoicePcm();
+                    invalidateCustomPocketVoice();
+                    void updateConfig({
+                      ai: {
+                        ...ai,
+                        customVoiceName: "",
+                        ttsVoice: ai.ttsVoice === "__custom__" ? "alba" : ai.ttsVoice,
+                      },
+                    });
+                  }}
+                >
+                  ✕ {ai.customVoiceName}
+                </button>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 5 }}>
+              <button
+                type="button"
+                className={`btn-xs ${recordingSample ? "is-mint-btn" : ""}`}
+                disabled={cloningBusy || recordingSample}
+                style={{ flex: 1 }}
+                onClick={() => void handleRecordVoiceSample()}
+              >
+                {recordingSample ? "Grabando 5s…" : "🎙 Grabar 5s"}
+              </button>
+              <button
+                type="button"
+                className="btn-xs"
+                disabled={cloningBusy || recordingSample}
+                style={{ flex: 1 }}
+                onClick={() => voiceFileInputRef.current?.click()}
+              >
+                📁 Subir audio
+              </button>
+              <input
+                ref={voiceFileInputRef}
+                type="file"
+                accept="audio/*"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (f) void handleUploadVoiceSample(f);
+                }}
+              />
+            </div>
           </div>
         )}
         {ttsStatus && (

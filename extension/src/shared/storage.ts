@@ -10,6 +10,7 @@ const RECORDINGS_KEY = "reco_ext_recordings_v1";
 const DICTATION_HISTORY_KEY = "reco_ext_dictation_history_v1";
 const CACHED_MODELS_KEY = "reco_ext_cached_models_v1";
 const CHAT_MESSAGES_KEY = "reco_ext_chat_messages_v1";
+const CUSTOM_VOICE_KEY = "reco_ext_custom_voice_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
   dictation: {
@@ -54,6 +55,8 @@ export const DEFAULT_CONFIG: AppConfig = {
     model: "",
     ttsMode: "kokoro",
     ttsVoice: "af_heart",
+    ttsSpeed: 1.05,
+    customVoiceName: "",
   },
   orbPosition: null,
 };
@@ -176,4 +179,54 @@ export async function saveChatMessages(msgs: PersistedChatMessage[]): Promise<vo
 
 export async function clearChatMessages(): Promise<void> {
   await chrome.storage.local.set({ [CHAT_MESSAGES_KEY]: [] });
+}
+
+export interface StoredCustomVoice {
+  name: string;
+  sampleRate: number;
+  pcm16Base64: string;
+}
+
+export async function saveCustomVoicePcm(pcm24k: Float32Array, name: string): Promise<void> {
+  // Cap to 8 seconds @ 24kHz (192k samples = ~384KB int16)
+  const maxSamples = 24000 * 8;
+  const trimmed = pcm24k.length > maxSamples ? pcm24k.subarray(0, maxSamples) : pcm24k;
+  const int16 = new Int16Array(trimmed.length);
+  for (let i = 0; i < trimmed.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, trimmed[i]));
+    int16[i] = clamped < 0 ? Math.round(clamped * 32768) : Math.round(clamped * 32767);
+  }
+  const bytes = new Uint8Array(int16.buffer);
+  let binary = "";
+  const step = 0x8000;
+  for (let i = 0; i < bytes.length; i += step) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + step));
+  }
+  const payload: StoredCustomVoice = {
+    name: name.trim() || "Mi voz",
+    sampleRate: 24000,
+    pcm16Base64: btoa(binary),
+  };
+  await chrome.storage.local.set({ [CUSTOM_VOICE_KEY]: payload });
+}
+
+export async function getCustomVoicePcm(): Promise<{
+  name: string;
+  sampleRate: number;
+  pcm: Float32Array;
+} | null> {
+  const data = await chrome.storage.local.get(CUSTOM_VOICE_KEY);
+  const raw = data[CUSTOM_VOICE_KEY] as StoredCustomVoice | undefined;
+  if (!raw?.pcm16Base64) return null;
+  const binary = atob(raw.pcm16Base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const pcm = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) pcm[i] = int16[i] / 32768;
+  return { name: raw.name || "Mi voz", sampleRate: raw.sampleRate || 24000, pcm };
+}
+
+export async function clearCustomVoicePcm(): Promise<void> {
+  await chrome.storage.local.remove(CUSTOM_VOICE_KEY);
 }

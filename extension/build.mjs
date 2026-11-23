@@ -264,7 +264,10 @@ async function run() {
   if (existsSync(ortSrc)) {
     mkdirSync(ortDst, { recursive: true });
     for (const file of readdirSync(ortSrc)) {
-      if (file.startsWith("ort-wasm-simd-threaded") && (file.endsWith(".mjs") || file.endsWith(".wasm"))) {
+      if (
+        file === "ort.min.mjs" ||
+        (file.startsWith("ort-wasm-simd-threaded") && (file.endsWith(".mjs") || file.endsWith(".wasm")))
+      ) {
         copyFileSync(resolve(ortSrc, file), resolve(ortDst, file));
       }
     }

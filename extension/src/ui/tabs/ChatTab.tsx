@@ -203,6 +203,7 @@ export function ChatTab({
           text: result.text,
           mode: ai.ttsMode,
           voice: ai.ttsVoice,
+          speed: ai.ttsSpeed,
           onStatus: setTtsStatus,
         });
       }
