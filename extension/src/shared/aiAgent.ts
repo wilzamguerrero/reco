@@ -42,7 +42,7 @@ const VISION_INTENT_RE =
   /\b(mira|míra|mirar|observa|ver|ves|veo|viendo|puedes ver|qué ves|que ves|qué hay|que hay|revisa|pantalla|página|pagina|estoy haciendo|hago|estoy viendo|dibuj\w*|trazo|trazos|pizarra|bosquejo|esquema|analiza esto|mira esto|captura|imagen|foto|aquí|aqui|esto que)\b/i;
 
 const PAGE_INTERACT_INTENT_RE =
-  /\b(abre|abrir|abrí|abri|clic|click|pulsa|pulsar|presiona|presionar|toca|tocar|dale|selecciona|elige|escribe|escribir|redacta|redactar|pon|ponle|llena|rellena|borra|busca|buscar|encuentra|envia|envía|enviar|manda|mandar|responde|responder|baja|sube|scroll|desplaza|entra|ve a|ir a|navega|pestaña|pestañas|tab|tabs|cambia|cambiar|pásate|pasate|salta|regresa|vuelve|cierra|cerrar|duplica|fija|fijar|silencia|silenciar|mutea|marcador|favorito|historial|google|correo|correos|email|mail|mensaje|botón|boton|campo|enlace|link|formulario|asunto|destinatario|resalta|resaltar|resáltala|resaltala|señala|señalar|señálala|señálame|senala|senalar|marca|marcar|subraya|encuadra|recuadro|apunta|indica|muestra|muéstrame|muestrame|dónde está|donde esta|dónde dice|donde dice|copia|copiar|atrás|atras|adelante|recarga|refresca|quita|limpia)\b/i;
+  /\b(abr\w*|clic\w*|click\w*|puls\w*|presion\w*|toc\w*|dale|seleccion\w*|elig\w*|escrib\w*|redact\w*|edit\w*|modific\w*|reemplaz\w*|pon\w*|llen\w*|rellen\w*|borr\w*|peg\w*|aplic\w*|hazlo|haz|hagas|busc\w*|encuentr\w*|envi\w*|enví\w*|mand\w*|respond\w*|baj\w*|sub\w*|scroll|desplaz\w*|entr\w*|ve a|ir a|naveg\w*|pestañ\w*|tab|tabs|cambi\w*|pásat\w*|pasat\w*|salt\w*|regres\w*|vuelv\w*|cierr\w*|duplic\w*|fij\w*|silenci\w*|mute\w*|marcador\w*|favorit\w*|historial|google|correo\w*|email|mail|mensaje\w*|botón|boton\w*|campo\w*|editor|texto|párrafo|parrafo|documento|enlace\w*|link\w*|formulario|asunto|destinatario|resalt\w*|señal\w*|senal\w*|marc\w*|subray\w*|encuadr\w*|recuadro\w*|apunt\w*|indic\w*|muestr\w*|dónde está|donde esta|dónde dice|donde dice|copi\w*|atrás|atras|adelante|recarg\w*|refresc\w*|quit\w*|limpi\w*)/i;
 
 const catalogCache = new Map<string, { at: number; models: FreePiModel[] }>();
 
@@ -100,7 +100,8 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante (solo si piden explícitamente ver o abrir la ventana; NO la uses para crear un nuevo chat)\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
     "- [[ACTION:PAGE_CLICK|<id_o_texto>]] -> hacer clic en un botón, enlace, imagen o correo de la página activa (usa el #id de la lista de elementos visibles, o su texto)\n" +
-    "- [[ACTION:PAGE_TYPE|<id_o_active>|<texto>]] -> escribir texto en un campo o editor de la página (usa el #id del campo o `active` para el campo con foco)\n" +
+    "- [[ACTION:PAGE_TYPE|<id_o_active>|<texto>]] -> escribir/añadir texto en un campo o editor de la página (usa el #id del campo/editor o `active`)\n" +
+    "- [[ACTION:PAGE_REPLACE|<id_o_active>|<texto>]] -> reemplazar todo el contenido de un campo o editor por el nuevo texto (ideal para editar/parafrasear)\n" +
     "- [[ACTION:PAGE_PRESS|<Enter|Escape|Tab>]] -> pulsar una tecla en el elemento activo\n" +
     "- [[ACTION:PAGE_HIGHLIGHT|<id_o_texto>|<etiqueta_opcional>]] -> señalar/resaltar con un recuadro brillante cualquier imagen, botón, enlace o sección de la página (puedes resaltar varios a la vez)\n" +
     "- [[ACTION:PAGE_CLEAR_HIGHLIGHTS]] -> quitar los recuadros de resaltado de la página\n" +
@@ -182,12 +183,15 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       await runBrowserAction({ kind: "open_history", query: arg }, `historial: ${arg}`);
     } else if (cmd === "PAGE_CLICK" && arg) {
       await runPageAction({ kind: "click", target: arg }, `clic: ${arg}`);
-    } else if (cmd === "PAGE_TYPE" && arg) {
+    } else if ((cmd === "PAGE_TYPE" || cmd === "PAGE_REPLACE") && arg) {
       const sep = arg.indexOf("|");
       const target = sep >= 0 ? arg.slice(0, sep).trim() : "active";
       const text = sep >= 0 ? arg.slice(sep + 1) : arg;
       if (text) {
-        await runPageAction({ kind: "type", target: target || "active", text }, `escribir: ${target || "active"}`);
+        await runPageAction(
+          { kind: "type", target: target || "active", text, clear: cmd === "PAGE_REPLACE" },
+          `${cmd === "PAGE_REPLACE" ? "reemplazar" : "escribir"}: ${target || "active"}`,
+        );
       }
     } else if (cmd === "PAGE_PRESS" && arg) {
       await runPageAction({ kind: "press", key: arg }, `tecla: ${arg}`);

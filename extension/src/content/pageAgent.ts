@@ -206,18 +206,30 @@ function isEditableElement(el: HTMLElement): boolean {
     return !blocked.has(el.type.toLowerCase()) && !el.disabled && !el.readOnly;
   }
   if (el.isContentEditable) return true;
+  if (el.ownerDocument?.designMode === "on" && el.tagName.toLowerCase() === "body") return true;
   const role = el.getAttribute("role");
   return role === "textbox" || role === "searchbox" || role === "combobox";
 }
 
+function getViewportRect(el: HTMLElement): DOMRect {
+  const rect = el.getBoundingClientRect();
+  const win = el.ownerDocument?.defaultView;
+  if (win && win !== window && win.frameElement instanceof HTMLElement) {
+    const frameRect = win.frameElement.getBoundingClientRect();
+    return new DOMRect(frameRect.left + rect.left, frameRect.top + rect.top, rect.width, rect.height);
+  }
+  return rect;
+}
+
 function isVisibleInViewport(el: HTMLElement): boolean {
-  const style = window.getComputedStyle(el);
+  const win = el.ownerDocument?.defaultView ?? window;
+  const style = win.getComputedStyle(el);
   if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) {
     return false;
   }
-  const rect = el.getBoundingClientRect();
+  const rect = getViewportRect(el);
   if (rect.width < 6 || rect.height < 6) return false;
-  const margin = 100;
+  const margin = 120;
   return (
     rect.bottom >= -margin &&
     rect.right >= -margin &&
@@ -254,7 +266,10 @@ function getElementLabel(el: HTMLElement): string {
   const title = el.getAttribute("title");
   if (title?.trim()) return cleanSnippet(title);
 
-  const placeholder = el.getAttribute("placeholder") || el.getAttribute("data-placeholder");
+  const placeholder =
+    el.getAttribute("placeholder") ||
+    el.getAttribute("data-placeholder") ||
+    el.getAttribute("data-mce-placeholder");
   if (placeholder?.trim()) return cleanSnippet(placeholder);
 
   const inner = cleanSnippet(el.innerText || el.textContent);
@@ -305,6 +320,12 @@ function getElementKind(el: HTMLElement): string {
 }
 
 function collectCandidates(root: Document | ShadowRoot, out: HTMLElement[]) {
+  if (root instanceof Document && root.body) {
+    if (root.body.isContentEditable || root.designMode === "on") {
+      out.push(root.body);
+    }
+  }
+
   const nodes = root.querySelectorAll(INTERACTIVE_SELECTOR);
   for (const node of nodes) {
     if (!(node instanceof HTMLElement)) continue;
@@ -314,7 +335,7 @@ function collectCandidates(root: Document | ShadowRoot, out: HTMLElement[]) {
     out.push(node);
   }
 
-  // Traverse open shadow roots & same-origin iframes
+  // Traverse open shadow roots & same-origin iframes (TinyMCE, CKEditor, etc.)
   const all = root.querySelectorAll("*");
   for (const el of all) {
     if (IGNORED_HOST_IDS.has(el.id)) continue;
@@ -333,7 +354,7 @@ function collectCandidates(root: Document | ShadowRoot, out: HTMLElement[]) {
 
 function flashElement(el: HTMLElement) {
   try {
-    const rect = el.getBoundingClientRect();
+    const rect = getViewportRect(el);
     if (rect.width < 2 || rect.height < 2) return;
     const box = document.createElement("div");
     box.style.position = "fixed";
@@ -364,6 +385,9 @@ export function capturePageSnapshot(): PageSnapshotResult {
     indexedElements.clear();
     const raw: HTMLElement[] = [];
     collectCandidates(document, raw);
+
+    // Prioritize editable fields/editors first so rich-text editors are never truncated by nav/toolbar buttons
+    raw.sort((a, b) => Number(isEditableElement(b)) - Number(isEditableElement(a)));
 
     const active = deepActiveElement();
     const seen = new Set<HTMLElement>();
@@ -472,7 +496,24 @@ function findElementByTarget(target: string, editableOnly = false): HTMLElement 
     }
   }
 
-  return best?.el ?? null;
+  if (best) return best.el;
+
+  // Smart fallback for typing: if user asked to write in "the editor" / "active" and focus was
+  // in RECO's floating chat, pick the largest visible editable field/editor on the page!
+  if (editableOnly) {
+    let largest: { el: HTMLElement; area: number } | null = null;
+    for (const el of candidates) {
+      if (!isEditableElement(el) || !isVisibleInViewport(el)) continue;
+      const r = getViewportRect(el);
+      const area = r.width * r.height;
+      if (!largest || area > largest.area) {
+        largest = { el, area };
+      }
+    }
+    return largest?.el ?? null;
+  }
+
+  return null;
 }
 
 function setNativeInputValue(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
@@ -488,6 +529,8 @@ function setNativeInputValue(el: HTMLInputElement | HTMLTextAreaElement, value: 
 function typeIntoElement(el: HTMLElement, text: string, clear = false): boolean {
   el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
   flashElement(el);
+  const doc = el.ownerDocument || document;
+  doc.defaultView?.focus?.();
   el.click();
   el.focus();
 
@@ -500,12 +543,15 @@ function typeIntoElement(el: HTMLElement, text: string, clear = false): boolean 
     return true;
   }
 
-  const editable = el.isContentEditable
-    ? el
-    : el.querySelector<HTMLElement>("[contenteditable='true'], [contenteditable='']") ?? el;
+  const editable =
+    el.isContentEditable || doc.designMode === "on"
+      ? el
+      : el.querySelector<HTMLElement>("[contenteditable='true'], [contenteditable='']") ?? el;
 
+  doc.defaultView?.focus?.();
   editable.focus();
-  const doc = editable.ownerDocument || document;
+
+  const beforeText = (editable.innerText || editable.textContent || "").trim();
   const sel = doc.getSelection();
   if (sel) {
     const range = doc.createRange();
@@ -515,11 +561,29 @@ function typeIntoElement(el: HTMLElement, text: string, clear = false): boolean 
     sel.addRange(range);
   }
 
-  const inserted = doc.execCommand?.("insertText", false, text);
-  if (!inserted) {
-    if (clear) editable.textContent = text;
-    else editable.appendChild(doc.createTextNode(text));
+  let ok = false;
+  try {
+    if (clear) {
+      doc.execCommand?.("selectAll", false);
+      doc.execCommand?.("delete", false);
+    }
+    ok = Boolean(doc.execCommand?.("insertText", false, text));
+  } catch {
+    ok = false;
+  }
+
+  const afterText = (editable.innerText || editable.textContent || "").trim();
+  if (!ok || (!clear && afterText === beforeText) || (clear && !afterText)) {
+    if (clear) editable.innerHTML = "";
+    const paragraphs = text.split(/\n+/);
+    for (const para of paragraphs) {
+      const p = doc.createElement("p");
+      p.textContent = para;
+      editable.appendChild(p);
+    }
     editable.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+    editable.dispatchEvent(new Event("change", { bubbles: true }));
+    editable.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Unidentified" }));
   }
   return true;
 }
