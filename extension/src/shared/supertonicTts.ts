@@ -310,15 +310,31 @@ function detectLang(text: string): "es" | "en" {
   return enHits > esHits + 1 ? "en" : "es";
 }
 
+// Keep frequently repeated phrases in memory for this extension page only.
+const phraseCache = new Map<string, { audio: Float32Array; sampleRate: number }>();
+const maxCacheBytes = 12 * 1024 * 1024;
+let cacheBytes = 0;
+
 export async function synthesizeSupertonicSentence(opts: {
   text: string;
   voice: string;
   speed?: number;
   steps?: number;
+  signal?: AbortSignal;
   onStatus?: (s: string | null) => void;
 }): Promise<{ audio: Float32Array; sampleRate: number }> {
+  opts.signal?.throwIfAborted();
+  const key = JSON.stringify([opts.text, opts.voice, opts.speed, opts.steps]);
+  const cached = phraseCache.get(key);
+  if (cached) {
+    phraseCache.delete(key);
+    phraseCache.set(key, cached);
+    return cached;
+  }
   const engine = await loadSupertonic(opts.onStatus);
+  opts.signal?.throwIfAborted();
   const style = await loadVoiceStyle(opts.voice, opts.onStatus);
+  opts.signal?.throwIfAborted();
   const lang = detectLang(opts.text);
   const processed = preprocessText(opts.text, lang);
 
@@ -343,6 +359,7 @@ export async function synthesizeSupertonicSentence(opts: {
   const rawDur = (dpOut.duration.data as Float32Array)[0] ?? 1.5;
   const durSec = Math.max(0.3, rawDur / speed);
 
+  opts.signal?.throwIfAborted();
   const textEncOut = await engine.textEncOrt.run({
     text_ids: textIdsTensor,
     style_ttl: style.ttl,
@@ -370,6 +387,7 @@ export async function synthesizeSupertonicSentence(opts: {
   for (let step = 0; step < totalSteps; step++) {
     // Yield briefly so the browser UI stays fluid during WASM fallback
     await new Promise((r) => window.setTimeout(r, 0));
+    opts.signal?.throwIfAborted();
     const vecOut = await engine.vectorEstOrt.run({
       noisy_latent: new ort.Tensor("float32", xt, [1, latentDimVal, latentLen]),
       text_emb: textEncOut.text_emb,
@@ -382,10 +400,22 @@ export async function synthesizeSupertonicSentence(opts: {
     xt = new Float32Array(vecOut.denoised_latent.data as Float32Array);
   }
 
+  opts.signal?.throwIfAborted();
   const vocOut = await engine.vocoderOrt.run({
     latent: new ort.Tensor("float32", xt, [1, latentDimVal, latentLen]),
   });
 
   const wav = new Float32Array(vocOut.wav_tts.data as Float32Array);
-  return { audio: wav, sampleRate: sr };
+  opts.signal?.throwIfAborted();
+  const result = { audio: wav, sampleRate: sr };
+  if (wav.byteLength <= maxCacheBytes) {
+    for (const [oldKey, old] of phraseCache) {
+      if (cacheBytes + wav.byteLength <= maxCacheBytes) break;
+      phraseCache.delete(oldKey);
+      cacheBytes -= old.audio.byteLength;
+    }
+    phraseCache.set(key, result);
+    cacheBytes += wav.byteLength;
+  }
+  return result;
 }

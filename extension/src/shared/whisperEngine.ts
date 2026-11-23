@@ -306,7 +306,7 @@ export function createWhisperEngine(opts: WhisperEngineOptions): SpeechEngineHan
       pendingQueue = [];
 
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       } catch (err) {
         active = false;
         const name = err instanceof Error ? err.name : "";

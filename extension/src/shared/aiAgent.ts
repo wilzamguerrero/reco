@@ -80,7 +80,7 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:CLOSE_DRAW]] -> cerrar pizarra de dibujo\n" +
     "- [[ACTION:START_DICTATION]] -> activar dictado normal en el cursor\n" +
     "- [[ACTION:SET_SPEECH_ENGINE|chrome]] o whisper_tiny o whisper_base -> cambiar motor de dictado\n" +
-    "- [[ACTION:SET_TTS|supertonic]] o pocket o piper o kokoro o moss o system o off -> cambiar voz de respuesta\n" +
+    "- [[ACTION:SET_TTS|supertonic]] o pocket o pocket-web o piper o kokoro o moss o system o off -> cambiar voz de respuesta\n" +
     "- [[ACTION:SET_AI_MODEL|<id_modelo>]] -> cambiar modelo de IA\n" +
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
@@ -133,6 +133,7 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       cmd === "SET_TTS" &&
       (arg === "supertonic" ||
         arg === "pocket" ||
+        arg === "pocket-web" ||
         arg === "kokoro" ||
         arg === "piper" ||
         arg === "moss" ||
@@ -208,6 +209,7 @@ export async function runRecoAgentTurn(opts: {
     userMsg,
     { id: assistantId, role: "assistant", text: "", reasoning: "", createdAt: Date.now() },
   ];
+  opts.signal?.throwIfAborted();
   await saveChatMessages(workingHistory);
 
   const wireMessages: FreePiChatMessage[] = [
@@ -262,11 +264,13 @@ export async function runRecoAgentTurn(opts: {
 
   const finalRaw = result.text || rawText;
   const cleanText = stripActionTags(finalRaw);
+  opts.signal?.throwIfAborted();
   const actions = await executeActionTags(finalRaw);
 
   const updated = workingHistory.map((m) =>
     m.id === assistantId ? { ...m, text: cleanText, reasoning: result.reasoning || reasoningText } : m,
   );
+  opts.signal?.throwIfAborted();
   await saveChatMessages(updated);
 
   return { text: cleanText, reasoning: result.reasoning || reasoningText, actions };

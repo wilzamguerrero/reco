@@ -80,6 +80,7 @@
   "permissions": [
     "activeTab",
     "contextMenus",
+    "declarativeNetRequestWithHostAccess",
     "desktopCapture",
     "identity",
     "nativeMessaging",

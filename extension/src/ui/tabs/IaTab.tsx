@@ -24,11 +24,13 @@ import {
 } from "../../shared/kokoroTts";
 import { clearCustomVoicePcm, saveCustomVoicePcm } from "../../shared/storage";
 import type { AiProviderId, AppConfig, TtsEngineMode } from "../../shared/types";
+import { pocketLanguage, pocketWebVoices } from "../../shared/kyutaiPocket";
 import { Icon } from "../components/Icon";
 
 const TTS_ENGINES: { id: TtsEngineMode; label: string; tip: string }[] = [
   { id: "supertonic", label: "SUPERTONIC", tip: "Supertonic-3 ONNX Web local (español nativo, 10 voces)" },
   { id: "pocket", label: "POCKET", tip: "Pocket TTS local (español streaming + clonación de voz)" },
+  { id: "pocket-web", label: "POCKET WEB", tip: "Envía el texto de la respuesta a Kyutai para generar la voz" },
   { id: "piper", label: "PIPER", tip: "Piper TTS local neuronal (español real, caché OPFS)" },
   { id: "kokoro", label: "KOKORO", tip: "Kokoro-82M local (WebGPU/WASM)" },
   { id: "moss", label: "MOSS", tip: "MOSS-TTS-Nano (Hugging Face Space)" },
@@ -180,7 +182,9 @@ export function IaTab({
     });
   }
 
+  const language = pocketLanguage(ai.pocketWebLanguage, ai.ttsVoice);
   const voiceList: VoiceOption[] =
+    ai.ttsMode === "pocket-web" ? pocketWebVoices :
     ai.ttsMode === "supertonic"
       ? SUPERTONIC_VOICES
       : ai.ttsMode === "pocket"
@@ -195,15 +199,21 @@ export function IaTab({
                 ? sysVoices
                 : [];
 
+  useEffect(() => {
+    stopSpeaking();
+    setTtsStatus(null);
+  }, [ai.ttsMode, ai.ttsVoice, ai.ttsSpeed, ai.pocketWebLanguage]);
+
   function switchTtsMode(next: TtsEngineMode) {
     stopSpeaking();
     const nextVoice =
+      next === "pocket-web" ? "lola" :
       next === "supertonic"
         ? SUPERTONIC_VOICES[0].id
         : next === "pocket"
           ? ai.customVoiceName
             ? "__custom__"
-            : "alba"
+            : "lola"
           : next === "piper"
             ? PIPER_VOICES[0].id
             : next === "kokoro"
@@ -407,6 +417,17 @@ export function IaTab({
           ))}
         </div>
 
+        {ai.ttsMode === "pocket-web" && (
+          <label className="pane-hint">
+            Idioma de la voz{" "}
+            <select className="chat-select" value={language} onChange={(e) =>
+              void updateConfig({ ai: { ...ai, pocketWebLanguage: e.target.value === "english" ? "english" : "spanish" } })
+            }>
+              <option value="spanish">Español</option>
+              <option value="english">Inglés</option>
+            </select>
+          </label>
+        )}
         {ai.ttsMode !== "off" && voiceList.length > 0 && (
           <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
             <select
@@ -414,7 +435,8 @@ export function IaTab({
               value={ai.ttsVoice}
               onChange={(e) => {
                 stopSpeaking();
-                void updateConfig({ ai: { ...ai, ttsVoice: e.target.value } });
+                void updateConfig({ ai: { ...ai, ttsVoice: e.target.value,
+                  pocketWebLanguage: ai.ttsMode === "pocket-web" ? language : ai.pocketWebLanguage } });
               }}
             >
               {voiceList.map((v) => (
@@ -431,10 +453,13 @@ export function IaTab({
               title="Escuchar prueba de voz"
               onClick={() =>
                 void speakReply({
-                  text: "Hola, soy RECO. Así suena esta voz en español.",
+                  text: ai.ttsMode === "pocket-web" && language === "english"
+                    ? "Hi, I'm RECO. This is how my voice sounds in English."
+                    : "Hola, soy RECO. Así suena esta voz en español.",
                   mode: ai.ttsMode,
                   voice: ai.ttsVoice,
                   speed: ai.ttsSpeed,
+                  pocketWebLanguage: ai.pocketWebLanguage,
                   onStatus: setTtsStatus,
                 })
               }

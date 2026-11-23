@@ -6,7 +6,7 @@ import {
   fetchProviderModels,
   type FreePiModel,
 } from "../../shared/freepiClient";
-import { speakReply, stopSpeaking } from "../../shared/kokoroTts";
+import { isPlaybackEcho, speakReply, stopSpeaking } from "../../shared/kokoroTts";
 import { createSpeechEngine, type SpeechEngineHandle } from "../../shared/speechEngine";
 import { clearChatMessages, getChatMessages } from "../../shared/storage";
 import type {
@@ -35,6 +35,12 @@ export function ChatTab({
   autoStartVoice?: boolean;
 }) {
   const ai = config.ai;
+  const currentAi = useRef(ai);
+  currentAi.current = ai;
+  useEffect(() => {
+    stopSpeaking();
+    setTtsStatus(null);
+  }, [ai.ttsMode, ai.ttsVoice, ai.ttsSpeed, ai.pocketWebLanguage]);
   const provider: AiProviderId = ai.provider || "freepi";
   const providerMeta = AI_PROVIDERS.find((p) => p.id === provider) ?? AI_PROVIDERS[0];
   const activeKey = provider === "freepi" ? ai.freepiToken : ai.keys?.[provider] ?? "";
@@ -56,6 +62,10 @@ export function ChatTab({
   const voiceEngineRef = useRef<SpeechEngineHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const sendCurrent = useRef(handleSend);
+  sendCurrent.current = handleSend;
+  const pendingVoice = useRef("");
+  const voiceTimer = useRef<number | undefined>(undefined);
   const autoStartedRef = useRef(false);
 
   // Sync persisted chat history (shared with hands-free voice mode!)
@@ -116,7 +126,10 @@ export function ChatTab({
   useEffect(() => {
     return () => {
       chatAbortRef.current?.abort();
-      voiceEngineRef.current?.stop();
+      const engine = voiceEngineRef.current;
+      voiceEngineRef.current = null;
+      clearTimeout(voiceTimer.current);
+      engine?.stop();
       stopSpeaking();
     };
   }, []);
@@ -175,8 +188,11 @@ export function ChatTab({
 
   async function handleSend(overrideText?: string) {
     const text = (overrideText ?? input).trim();
-    if ((!text && attachments.length === 0) || streaming || !hasCred) return;
+    if ((!text && attachments.length === 0) || (streaming && !overrideText) || !hasCred) return;
 
+    clearTimeout(voiceTimer.current);
+    pendingVoice.current = "";
+    chatAbortRef.current?.abort();
     const currentAttachments = [...attachments];
     setInput("");
     setAttachments([]);
@@ -194,63 +210,103 @@ export function ChatTab({
         attachments: currentAttachments,
         signal: ctrl.signal,
         onDelta(cleanSoFar) {
-          setLiveReply(cleanSoFar);
+          if (!ctrl.signal.aborted) setLiveReply(cleanSoFar);
         },
       });
+      if (ctrl.signal.aborted) return;
       setLiveReply("");
+      setStreaming(false);
+      const ai = currentAi.current;
       if (result.text && ai.ttsMode !== "off") {
-        void speakReply({
+        await speakReply({
           text: result.text,
           mode: ai.ttsMode,
           voice: ai.ttsVoice,
+          pocketWebLanguage: ai.pocketWebLanguage,
           speed: ai.ttsSpeed,
           onStatus: setTtsStatus,
         });
       }
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === "AbortError")) {
+      if (!ctrl.signal.aborted && !(err instanceof DOMException && err.name === "AbortError")) {
         setChatErr(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      setStreaming(false);
-      setLiveReply("");
+      if (chatAbortRef.current === ctrl) {
+        chatAbortRef.current = null;
+        setStreaming(false);
+        setLiveReply("");
+      }
     }
   }
 
   function toggleVoiceChat() {
-    if (voiceListening) {
-      voiceEngineRef.current?.stop();
-      voiceEngineRef.current = null;
-      setVoiceListening(false);
+    if (voiceEngineRef.current) {
+      voiceEngineRef.current.stop();
       return;
     }
     stopSpeaking();
     setChatErr("");
-    let collected = "";
+    pendingVoice.current = "";
+    function sendPhrase() {
+      clearTimeout(voiceTimer.current);
+      const phrase = pendingVoice.current.trim();
+      pendingVoice.current = "";
+      if (phrase) void sendCurrent.current(phrase);
+    }
+    function interrupt() {
+      chatAbortRef.current?.abort();
+      chatAbortRef.current = null;
+      stopSpeaking();
+      setStreaming(false);
+      setLiveReply("");
+      setTtsStatus(null);
+    }
+    let loudSince = 0;
     const eng = createSpeechEngine({
       language: config.dictation.language,
       polish: config.dictation.polish,
+      onLevel(level) {
+        if (voiceEngineRef.current !== eng || !chatAbortRef.current || level < 0.05) {
+          loudSince = 0;
+          return;
+        }
+        const now = performance.now();
+        if (!loudSince) loudSince = now;
+        else if (now - loudSince >= 140) interrupt();
+      },
       onInterim(t) {
-        setInput(collected ? `${collected} ${t}` : t);
+        if (voiceEngineRef.current !== eng || !t.trim() || isPlaybackEcho(t)) return;
+        clearTimeout(voiceTimer.current);
+        interrupt();
+        setInput([pendingVoice.current, t].filter(Boolean).join(" "));
       },
       onFinal(t) {
-        collected = collected ? `${collected} ${t}` : t;
-        setInput(collected);
+        if (voiceEngineRef.current !== eng || !t.trim() || isPlaybackEcho(t)) return;
+        interrupt();
+        pendingVoice.current = [pendingVoice.current, t].filter(Boolean).join(" ");
+        setInput(pendingVoice.current);
+        clearTimeout(voiceTimer.current);
+        voiceTimer.current = window.setTimeout(sendPhrase, 550);
       },
       onError(msg, fatal) {
-        if (fatal) {
-          setChatErr(msg);
-          setVoiceListening(false);
-        }
+        if (voiceEngineRef.current !== eng || !fatal) return;
+        clearTimeout(voiceTimer.current);
+        pendingVoice.current = "";
+        setChatErr(msg);
       },
       onStop() {
+        if (voiceEngineRef.current !== eng) return;
+        voiceEngineRef.current = null;
         setVoiceListening(false);
-        if (collected.trim()) void handleSend(collected.trim());
+        sendPhrase();
       },
     });
     voiceEngineRef.current = eng;
     setVoiceListening(true);
     void eng.start().catch((err) => {
+      if (voiceEngineRef.current !== eng) return;
+      voiceEngineRef.current = null;
       setVoiceListening(false);
       setChatErr(err instanceof Error ? err.message : String(err));
     });
@@ -387,6 +443,7 @@ export function ChatTab({
                           text: shownText,
                           mode: ai.ttsMode === "off" ? "piper" : ai.ttsMode,
                           voice: ai.ttsVoice,
+                          pocketWebLanguage: ai.pocketWebLanguage,
                           onStatus: setTtsStatus,
                         })
                       }
@@ -455,7 +512,7 @@ export function ChatTab({
         <button
           type="button"
           className={`icon-btn ${voiceListening ? "is-listening-btn" : ""}`}
-          title={voiceListening ? "Detener y enviar" : "Hablar"}
+          title={voiceListening ? "Terminar conversaci?n por voz" : "Conversar por voz"}
           onClick={toggleVoiceChat}
         >
           <Icon name={voiceListening ? "stop" : "mic"} size={14} />

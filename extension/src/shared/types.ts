@@ -82,6 +82,7 @@ export type AiProviderId =
 export type TtsEngineMode =
   | "supertonic"
   | "pocket"
+  | "pocket-web"
   | "piper"
   | "kokoro"
   | "moss"
@@ -100,6 +101,7 @@ export interface AiAssistantConfig {
   model: string;
   ttsMode: TtsEngineMode;
   ttsVoice: string;
+  pocketWebLanguage?: import("./kyutaiPocket").PocketWebLanguage;
   ttsSpeed?: number;
   customVoiceName?: string;
 }

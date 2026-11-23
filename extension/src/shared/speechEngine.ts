@@ -102,7 +102,7 @@ export function createSpeechEngine(opts: SpeechEngineOptions): SpeechEngineHandl
 
   async function startMicMeter() {
     try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
       audioCtx = new AudioContext();
       const source = audioCtx.createMediaStreamSource(micStream);
       const analyser = audioCtx.createAnalyser();

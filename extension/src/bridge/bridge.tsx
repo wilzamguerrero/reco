@@ -9,7 +9,7 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { runRecoAgentTurn } from "../shared/aiAgent";
-import { speakReply, stopSpeaking } from "../shared/kokoroTts";
+import { isPlaybackEcho, speakReply, stopSpeaking } from "../shared/kokoroTts";
 import { createSpeechEngine, type SpeechEngineHandle } from "../shared/speechEngine";
 import { getConfig } from "../shared/storage";
 import type { ExtMessage } from "../shared/types";
@@ -33,7 +33,9 @@ function BridgeApp() {
     let pendingTranscript = "";
     let turnTimer: number | null = null;
     let abortCtrl: AbortController | null = null;
-    let bargeStop: (() => void) | null = null;
+    let voiceSettings: Awaited<ReturnType<typeof getConfig>>["ai"] | undefined;
+    let loudSince = 0;
+    let speaking = false;
 
     const sendAiPhase = (phase: "idle" | "listening" | "thinking" | "speaking", st?: string | null) => {
       void chrome.runtime.sendMessage({
@@ -43,130 +45,69 @@ function BridgeApp() {
       } satisfies ExtMessage);
     };
 
-    /**
-     * Monitor ligero de interrupción natural (barge-in):
-     * Mientras RECO está hablando, escucha el micrófono con cancelación de eco
-     * del navegador (`echoCancellation: true`). Si el usuario empieza a hablar
-     * (~200ms por encima del umbral), detiene la voz de RECO al instante para
-     * escuchar lo nuevo como una conversación natural.
-     */
-    function startBargeInMonitor(onInterrupt: () => void): () => void {
-      let stopped = false;
-      let stream: MediaStream | null = null;
-      let ctx: AudioContext | null = null;
-      let timer: number | null = null;
-
-      const cleanup = () => {
-        if (stopped) return;
-        stopped = true;
-        if (timer !== null) clearInterval(timer);
-        timer = null;
-        stream?.getTracks().forEach((t) => t.stop());
-        stream = null;
-        if (ctx) {
-          void ctx.close().catch(() => {});
-          ctx = null;
-        }
-      };
-
-      void navigator.mediaDevices
-        .getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        })
-        .then((s) => {
-          if (stopped) {
-            s.getTracks().forEach((t) => t.stop());
-            return;
-          }
-          stream = s;
-          ctx = new AudioContext();
-          const source = ctx.createMediaStreamSource(s);
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 512;
-          source.connect(analyser);
-          const data = new Float32Array(analyser.fftSize);
-          const startedAt = performance.now();
-          let hotFrames = 0;
-
-          timer = window.setInterval(() => {
-            if (stopped) return;
-            // Grace period so initial TTS audio doesn't false-trigger
-            if (performance.now() - startedAt < 400) return;
-            analyser.getFloatTimeDomainData(data);
-            let sum = 0;
-            for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-            const level = Math.sqrt(sum / data.length);
-            if (level > 0.058) {
-              hotFrames += 1;
-              if (hotFrames >= 4) {
-                cleanup();
-                onInterrupt();
-              }
-            } else {
-              hotFrames = Math.max(0, hotFrames - 1);
-            }
-          }, 50);
-        })
-        .catch(() => {
-          // If mic cannot be opened concurrently, just skip barge-in silently
-        });
-
-      return cleanup;
+    function interruptTurn() {
+      abortCtrl?.abort();
+      abortCtrl = null;
+      stopSpeaking();
+      speaking = false;
+      aiBusy = false;
+      loudSince = 0;
+      setStatus("Te escucho...");
+      sendAiPhase("listening", null);
     }
 
     async function runAiVoiceTurn(spokenText: string) {
       if (disposed || aiBusy || !spokenText.trim()) return;
       aiBusy = true;
-      engine?.stop();
+      loudSince = 0;
       setLastLine(spokenText);
       setStatus("Pensando…");
       sendAiPhase("thinking", "RECO pensando…");
 
-      abortCtrl = new AbortController();
-      let interrupted = false;
+      const turn = new AbortController();
+      abortCtrl = turn;
       try {
-        const cfg = await getConfig();
+        const initial = await getConfig();
+        if (turn.signal.aborted || disposed) return;
+        voiceSettings = initial.ai;
+        let opening = "";
+        let openingAudio: Promise<void> | undefined;
+        const readAloud = (text: string, ai: typeof initial.ai) => {
+          voiceSettings = ai;
+          speaking = true;
+          setStatus("Respondiendo por voz...");
+          sendAiPhase("speaking", null);
+          return speakReply({
+            text, mode: ai.ttsMode, voice: ai.ttsVoice, speed: ai.ttsSpeed, pocketWebLanguage: ai.pocketWebLanguage,
+            onStatus(s) {
+              if (turn.signal.aborted || disposed) return;
+              setStatus(s || "Respondiendo por voz...");
+              sendAiPhase("speaking", s);
+            },
+          });
+        };
         const res = await runRecoAgentTurn({
           userText: spokenText,
-          signal: abortCtrl.signal,
+          signal: turn.signal,
+          onDelta(text) {
+            if (disposed || turn.signal.aborted || opening || voiceSettings?.ttsMode === "off") return;
+            const sentence = text.match(/^(.+?[.!?\u2026])\s/u)?.[1];
+            if (!sentence || /[`\[\]]/.test(sentence)) return;
+            opening = sentence;
+            openingAudio = readAloud(opening, voiceSettings ?? initial.ai);
+          },
         });
-        if (disposed) return;
-
+        if (disposed || turn.signal.aborted) return;
         setLastLine(res.text);
-        if (res.text && cfg.ai.ttsMode !== "off") {
-          setStatus("Respondiendo por voz… (habla para interrumpir)");
-          sendAiPhase("speaking", null);
-
-          bargeStop?.();
-          bargeStop = startBargeInMonitor(() => {
-            interrupted = true;
-            stopSpeaking();
-            abortCtrl?.abort();
-          });
-
-          try {
-            await speakReply({
-              text: res.text,
-              mode: cfg.ai.ttsMode,
-              voice: cfg.ai.ttsVoice,
-              speed: cfg.ai.ttsSpeed,
-              onStatus(s) {
-                if (interrupted || disposed) return;
-                setStatus(s || "Respondiendo por voz…");
-                sendAiPhase("speaking", s);
-              },
-            });
-          } finally {
-            bargeStop?.();
-            bargeStop = null;
-          }
-        }
+        await openingAudio;
+        const cfg = await getConfig();
+        if (disposed || turn.signal.aborted || cfg.ai.ttsMode === "off") return;
+        const rest = opening && res.text.startsWith(opening)
+          ? res.text.slice(opening.length).trim() : res.text;
+        if (rest) await readAloud(rest, cfg.ai);
       } catch (err) {
-        if (!(err instanceof DOMException && err.name === "AbortError")) {
+        if (abortCtrl === turn) stopSpeaking();
+        if (!disposed && !turn.signal.aborted && !(err instanceof DOMException && err.name === "AbortError")) {
           const msg = err instanceof Error ? err.message : String(err);
           setStatus(msg);
           void chrome.runtime.sendMessage({
@@ -176,13 +117,13 @@ function BridgeApp() {
           } satisfies ExtMessage);
         }
       } finally {
-        bargeStop?.();
-        bargeStop = null;
-        aiBusy = false;
-        if (!disposed) {
-          setStatus(interrupted ? "Te escucho…" : "Escuchando… habla con RECO IA");
+        if (abortCtrl === turn && !disposed) {
+          abortCtrl = null;
+          aiBusy = false;
+          speaking = false;
+          loudSince = 0;
+          setStatus("Te escucho...");
           sendAiPhase("listening", null);
-          void engine?.start().catch(() => {});
         }
       }
     }
@@ -202,19 +143,30 @@ function BridgeApp() {
             sendAiPhase("listening", null);
           },
           onLevel(level: number) {
+            if (disposed) return;
             setRms(level);
+            if (aiBusy && level > 0.05) {
+              const now = performance.now();
+              if (!loudSince) loudSince = now;
+              else if (now - loudSince >= 140) interruptTurn();
+            } else {
+              loudSince = 0;
+            }
             if (!aiBusy) {
               void chrome.runtime.sendMessage({ type: "AI_VOICE_LEVEL", rms: level } satisfies ExtMessage);
             }
           },
           onInterim(text: string) {
+            if (disposed) return;
+            if (aiBusy && text.trim() && text !== "\u2026" && !isPlaybackEcho(text)) interruptTurn();
             if (text.trim() && turnTimer !== null) {
               clearTimeout(turnTimer);
               turnTimer = null;
             }
           },
           onFinal(text: string) {
-            if (aiBusy || !text.trim()) return;
+            if (disposed || !text.trim() || isPlaybackEcho(text)) return;
+            if (aiBusy) interruptTurn();
             pendingTranscript = pendingTranscript ? `${pendingTranscript} ${text}` : text;
             if (turnTimer !== null) clearTimeout(turnTimer);
             // Small pause to let user finish multi-clause thought before RECO replies
@@ -223,7 +175,7 @@ function BridgeApp() {
               pendingTranscript = "";
               turnTimer = null;
               if (phrase) void runAiVoiceTurn(phrase);
-            }, cfg.dictation.engine === "chrome" ? 850 : 250);
+            }, cfg.dictation.engine === "chrome" ? 550 : 250);
           },
           onError(message: string, fatal: boolean) {
             setStatus(message);
@@ -338,12 +290,17 @@ function BridgeApp() {
       } else if (msg.type === "AI_VOICE_STOP" && IS_AI_MODE) {
         disposed = true;
         if (turnTimer !== null) clearTimeout(turnTimer);
-        bargeStop?.();
-        bargeStop = null;
         abortCtrl?.abort();
         stopSpeaking();
         engine?.stop();
       } else if (msg.type === "CONFIG_UPDATED") {
+        if (speaking && voiceSettings && (
+          voiceSettings.ttsMode !== msg.config.ai.ttsMode ||
+          voiceSettings.ttsVoice !== msg.config.ai.ttsVoice ||
+          voiceSettings.pocketWebLanguage !== msg.config.ai.pocketWebLanguage ||
+          voiceSettings.ttsSpeed !== msg.config.ai.ttsSpeed
+        )) interruptTurn();
+        voiceSettings = msg.config.ai;
         engine?.updateOptions({
           language: msg.config.dictation.language,
           polish: msg.config.dictation.polish,
@@ -358,8 +315,6 @@ function BridgeApp() {
     return () => {
       disposed = true;
       if (turnTimer !== null) clearTimeout(turnTimer);
-      bargeStop?.();
-      bargeStop = null;
       abortCtrl?.abort();
       stopSpeaking();
       chrome.runtime.onMessage.removeListener(listener);

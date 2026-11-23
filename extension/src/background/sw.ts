@@ -17,6 +17,33 @@ const BRIDGE_URL = chrome.runtime.getURL("bridge.html");
 const PERMISSIONS_URL = chrome.runtime.getURL("permissions.html");
 const NATIVE_HOST_NAME = "com.reco.typer";
 
+// Kyutai labels its streamed PCM as a downloadable WAV. Remove only that
+// header for RECO's own synthesis requests, including the local server.
+function installPocketAudioRule() {
+  return chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: [1],
+    addRules: [{
+      id: 1,
+      priority: 1,
+      action: {
+        type: chrome.declarativeNetRequest.RuleActionType.MODIFY_HEADERS,
+        responseHeaders: [{
+          header: "content-disposition",
+          operation: chrome.declarativeNetRequest.HeaderOperation.REMOVE,
+        }],
+      },
+      condition: {
+        regexFilter: "^https?://(127[.]0[.]0[.]1:8766/tts|pocket-tts-api[.]kyutai[.]org/(spanish|english)/tts)$",
+        initiatorDomains: [chrome.runtime.id],
+        requestMethods: [chrome.declarativeNetRequest.RequestMethod.POST],
+        resourceTypes: [chrome.declarativeNetRequest.ResourceType.XMLHTTPREQUEST],
+      },
+    }],
+  });
+}
+
+chrome.runtime.onInstalled.addListener(installPocketAudioRule);
+
 let state: LiveState = {
   dictationPhase: "idle",
   dictationStartedAt: null,
