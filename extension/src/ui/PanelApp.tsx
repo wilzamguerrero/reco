@@ -6,15 +6,17 @@ import { useRecoState } from "./hooks/useRecoState";
 import { BibliotecaTab } from "./tabs/BibliotecaTab";
 import { DictadoTab } from "./tabs/DictadoTab";
 import { GrabarTab } from "./tabs/GrabarTab";
+import { IaTab } from "./tabs/IaTab";
 import { NotionTab } from "./tabs/NotionTab";
 
-type Tab = "dictado" | "grabar" | "biblioteca" | "notion";
+type Tab = "dictado" | "grabar" | "biblioteca" | "notion" | "ia";
 
 const TABS: { id: Tab; label: string; icon: IconName }[] = [
   { id: "dictado", label: "Dictar", icon: "mic" },
   { id: "grabar", label: "Grabar", icon: "monitor" },
   { id: "biblioteca", label: "Clips", icon: "grid" },
   { id: "notion", label: "Notion", icon: "notion" },
+  { id: "ia", label: "IA", icon: "spark" },
 ];
 
 export function PanelApp({ isSidePanel = false }: { isSidePanel?: boolean }) {
@@ -159,6 +161,7 @@ export function PanelApp({ isSidePanel = false }: { isSidePanel?: boolean }) {
           />
         )}
         {tab === "notion" && <NotionTab config={config} updateConfig={updateConfig} />}
+        {tab === "ia" && <IaTab config={config} updateConfig={updateConfig} />}
       </main>
     </div>
   );

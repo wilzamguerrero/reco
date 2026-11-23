@@ -20,6 +20,9 @@ export type OrbVisualState =
   | "starting"
   | "dictation"
   | "speaking"
+  | "ai_listening"
+  | "ai_thinking"
+  | "ai_speaking"
   | "inserting"
   | "error"
   | "recording"
@@ -77,6 +80,24 @@ const PALETTES: Record<OrbVisualState, FlatPalette> = {
     fg: [9, 9, 11], // #09090B ink
     border: [9, 9, 11],
     accent: [245, 241, 232],
+  },
+  ai_listening: {
+    bg: [139, 110, 255], // #8B6EFF bauhaus violet (hands-free AI voice listening)
+    fg: [9, 9, 11],
+    border: [9, 9, 11],
+    accent: [245, 241, 232],
+  },
+  ai_thinking: {
+    bg: [9, 9, 11], // obsidian + violet thinking loader
+    fg: [139, 110, 255],
+    border: [139, 110, 255],
+    accent: [234, 229, 217],
+  },
+  ai_speaking: {
+    bg: [139, 110, 255], // #8B6EFF violet + bright bone acoustic pulse
+    fg: [245, 241, 232],
+    border: [9, 9, 11],
+    accent: [9, 9, 11],
   },
   inserting: {
     bg: [245, 241, 232], // #F5F1E8 bone paper flash
@@ -246,7 +267,15 @@ export function mountOrb(
     currentState = state;
     targetPalette = PALETTES[state] ?? PALETTES.idle;
     stateBlend = 0;
-    if (state !== "dictation" && state !== "speaking" && state !== "recording") levelTarget = 0;
+    if (
+      state !== "dictation" &&
+      state !== "speaking" &&
+      state !== "ai_listening" &&
+      state !== "ai_speaking" &&
+      state !== "recording"
+    ) {
+      levelTarget = 0;
+    }
   }
 
   function setLevel(rms: number) {
@@ -780,6 +809,15 @@ export function mountOrb(
         break;
       case "speaking":
         drawSpeakingGlyph(innerR, t, level, fgStr, bgStr);
+        break;
+      case "ai_listening":
+        drawListeningGlyph(innerR, t, level, fgStr);
+        break;
+      case "ai_thinking":
+        drawStartingGlyph(innerR, t, fgStr, accentStr);
+        break;
+      case "ai_speaking":
+        drawSpeakingGlyph(innerR, t, Math.max(0.35, level), fgStr, bgStr);
         break;
       case "inserting":
         drawInsertingGlyph(innerR, stateBlend, fgStr);

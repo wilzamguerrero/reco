@@ -16,7 +16,7 @@ import type { AppConfig, ExtMessage, LiveState } from "../shared/types";
 import { createDrawOverlay } from "./drawOverlay";
 
 const HOST_ID = "reco-ext-host";
-const GUARD_KEY = "__recoOverlayLoaded_v16";
+const GUARD_KEY = "__recoOverlayLoaded_v17";
 const CONTROL_SIZE = 42;
 const TILE_GAP = 8;
 const TILE_STEP = CONTROL_SIZE + TILE_GAP;
@@ -331,6 +331,9 @@ function runOverlay() {
     if (state.recordingPhase === "recording") return "recording";
     if (state.recordingPhase === "paused") return "paused";
     if (state.recordingPhase === "uploading" || state.uploadActiveId) return "uploading";
+    if (state.aiVoicePhase === "thinking") return "ai_thinking";
+    if (state.aiVoicePhase === "speaking") return "ai_speaking";
+    if (state.aiVoicePhase === "listening") return "ai_listening";
     if (state.dictationPhase === "listening") {
       if (state.dictationStatus) return "starting";
       const hasInterim = state.dictationInterim.trim().length > 0;
@@ -349,6 +352,7 @@ function runOverlay() {
     if (!state) return true;
     return (
       state.dictationPhase === "idle" &&
+      state.aiVoicePhase === "idle" &&
       state.recordingPhase === "idle" &&
       !state.uploadActiveId
     );
@@ -876,6 +880,10 @@ function runOverlay() {
         void chrome.runtime.sendMessage({ type: "DICTATION_STOP" } satisfies ExtMessage);
         return;
       }
+      if (currentState?.aiVoicePhase && currentState.aiVoicePhase !== "idle") {
+        void chrome.runtime.sendMessage({ type: "AI_VOICE_STOP" } satisfies ExtMessage);
+        return;
+      }
       if (
         currentState?.recordingPhase === "recording" ||
         currentState?.recordingPhase === "paused"
@@ -956,6 +964,8 @@ function runOverlay() {
 
     if (currentState?.dictationPhase === "listening") {
       orbHandle.setLevel(currentState.dictationLevel);
+    } else if (currentState?.aiVoicePhase === "listening") {
+      orbHandle.setLevel(currentState.aiVoiceLevel);
     } else if (currentState?.recordingPhase === "recording") {
       orbHandle.setLevel(currentState.recordingLevel);
     } else {
@@ -991,7 +1001,7 @@ function runOverlay() {
 
     fabGroupEl.classList.toggle("is-open", menuOpen && idle);
 
-    const activeToast = currentState?.dictationStatus || toastText;
+    const activeToast = currentState?.aiVoiceStatus || currentState?.dictationStatus || toastText;
     if (activeToast) {
       toastEl.textContent = activeToast;
       toastEl.classList.add("is-visible");
@@ -1113,6 +1123,13 @@ function runOverlay() {
 
     if (msg.type === "OPEN_FLOATING_CHAT") {
       openFloatingChat(Boolean(msg.autoVoice));
+      return;
+    }
+
+    if (msg.type === "DRAW_CONTROL") {
+      if (msg.action === "open") drawOverlayHandle?.open();
+      else if (msg.action === "close") drawOverlayHandle?.close();
+      else drawOverlayHandle?.toggle();
     }
   });
 

@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",
+    "@mintplex-labs/piper-tts-web": "^1.0.5",
     "kokoro-js": "^1.2.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

@@ -28,6 +28,10 @@ let state: LiveState = {
   dictationHostTabId: null,
   nativeHostConnected: false,
 
+  aiVoicePhase: "idle",
+  aiVoiceLevel: 0,
+  aiVoiceStatus: null,
+
   recordingPhase: "idle",
   recordingId: null,
   recordingStartedAt: null,
@@ -387,6 +391,64 @@ async function stopDictation() {
   }
 }
 
+/* ----------------------------------------------------------- VOZ IA LIBRE */
+
+async function startAiVoice(explicitTabId?: number) {
+  if (state.aiVoicePhase !== "idle") return;
+  if (state.dictationPhase === "listening") {
+    await stopDictation();
+  }
+
+  const activeTab = explicitTabId
+    ? await chrome.tabs.get(explicitTabId).catch(() => null)
+    : await getActiveWebTab();
+  if (activeTab?.id) {
+    lastTargetTabId = activeTab.id;
+    void ensureContentInjected(activeTab.id);
+  }
+
+  state = {
+    ...state,
+    aiVoicePhase: "listening",
+    aiVoiceLevel: 0,
+    aiVoiceStatus: null,
+  };
+  await broadcastState();
+
+  if (bridgeTabId !== null) {
+    await chrome.tabs.remove(bridgeTabId).catch(() => {});
+    bridgeTabId = null;
+  }
+
+  const tab = await chrome.tabs.create({
+    url: `${BRIDGE_URL}?mode=ai`,
+    pinned: true,
+    active: false,
+  });
+  bridgeTabId = tab.id ?? null;
+}
+
+async function stopAiVoice() {
+  if (state.aiVoicePhase === "idle" && bridgeTabId === null) return;
+  void chrome.runtime.sendMessage({ type: "AI_VOICE_STOP" } satisfies ExtMessage).catch(() => {});
+
+  const tabToClose = bridgeTabId;
+  bridgeTabId = null;
+  state = {
+    ...state,
+    aiVoicePhase: "idle",
+    aiVoiceLevel: 0,
+    aiVoiceStatus: null,
+  };
+  await broadcastState();
+
+  if (tabToClose !== null) {
+    setTimeout(() => {
+      void chrome.tabs.remove(tabToClose).catch(() => {});
+    }, 350);
+  }
+}
+
 /* ---------------------------------------------------------------- GRABACIÓN */
 
 async function startRecording() {
@@ -528,16 +590,8 @@ chrome.commands.onCommand.addListener((command) => {
       void chrome.runtime.sendMessage({ type: "OFFSCREEN_PAUSE_TOGGLE" } satisfies ExtMessage);
     }
   } else if (command === "toggle-ai-voice") {
-    void (async () => {
-      const tab = await getActiveWebTab();
-      if (!tab?.id) return;
-      await ensureContentInjected(tab.id);
-      void chrome.tabs
-        .sendMessage(tab.id, { type: "OPEN_FLOATING_CHAT", autoVoice: true } satisfies ExtMessage, {
-          frameId: 0,
-        })
-        .catch(() => {});
-    })();
+    if (state.aiVoicePhase !== "idle") void stopAiVoice();
+    else void startAiVoice();
   }
 });
 
@@ -831,6 +885,47 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
           { type: "OPEN_FLOATING_CHAT", autoVoice: Boolean(msg.autoVoice) } satisfies ExtMessage,
           { frameId: 0 },
         )
+        .catch(() => {});
+    })();
+    return;
+  }
+
+  if (msg.type === "AI_VOICE_TOGGLE") {
+    if (state.aiVoicePhase !== "idle") void stopAiVoice();
+    else void startAiVoice(msg.targetTabId ?? sender.tab?.id);
+    return;
+  }
+
+  if (msg.type === "AI_VOICE_START") {
+    void startAiVoice(msg.targetTabId ?? sender.tab?.id);
+    return;
+  }
+
+  if (msg.type === "AI_VOICE_STOP") {
+    void stopAiVoice();
+    return;
+  }
+
+  if (msg.type === "AI_VOICE_PHASE") {
+    state.aiVoicePhase = msg.phase;
+    if (msg.status !== undefined) state.aiVoiceStatus = msg.status;
+    broadcastStateFast();
+    return;
+  }
+
+  if (msg.type === "AI_VOICE_LEVEL") {
+    state.aiVoiceLevel = msg.rms;
+    broadcastStateFast();
+    return;
+  }
+
+  if (msg.type === "DRAW_CONTROL") {
+    void (async () => {
+      const tab = await getActiveWebTab();
+      if (!tab?.id) return;
+      await ensureContentInjected(tab.id);
+      void chrome.tabs
+        .sendMessage(tab.id, msg, { frameId: 0 })
         .catch(() => {});
     })();
     return;

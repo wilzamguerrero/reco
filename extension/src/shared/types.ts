@@ -79,6 +79,10 @@ export type AiProviderId =
   | "nvidia"
   | "custom";
 
+export type TtsEngineMode = "kokoro" | "piper" | "moss" | "system" | "off";
+
+export type AiVoicePhase = "idle" | "listening" | "thinking" | "speaking";
+
 export interface AiAssistantConfig {
   provider: AiProviderId;
   freepiToken: string;
@@ -87,8 +91,25 @@ export interface AiAssistantConfig {
   models: Record<string, string>;
   customBaseUrl: string;
   model: string;
-  ttsMode: "kokoro" | "system" | "off";
+  ttsMode: TtsEngineMode;
   ttsVoice: string;
+}
+
+export interface PersistedChatAttachment {
+  id: string;
+  kind: "image" | "doc";
+  name: string;
+  dataUrl?: string;
+  textContent?: string;
+}
+
+export interface PersistedChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  reasoning?: string;
+  attachments?: PersistedChatAttachment[];
+  createdAt: number;
 }
 
 export interface AppConfig {
@@ -134,6 +155,10 @@ export interface LiveState {
   dictationLevel: number;
   dictationHostTabId: number | null;
   nativeHostConnected: boolean;
+
+  aiVoicePhase: AiVoicePhase;
+  aiVoiceLevel: number;
+  aiVoiceStatus: string | null;
 
   recordingPhase: RecordingPhase;
   recordingId: string | null;
@@ -210,5 +235,11 @@ export type ExtMessage =
   | { type: "OPEN_PERMISSIONS"; afterAction?: "dictation" | "recording" }
   | { type: "CAPTURE_TAB_SCREEN" }
   | { type: "OPEN_FLOATING_CHAT"; autoVoice?: boolean }
-  | { type: "OPEN_SIDEPANEL" }
+  | { type: "AI_VOICE_TOGGLE"; targetTabId?: number }
+  | { type: "AI_VOICE_START"; targetTabId?: number }
+  | { type: "AI_VOICE_STOP" }
+  | { type: "AI_VOICE_PHASE"; phase: AiVoicePhase; status?: string | null }
+  | { type: "AI_VOICE_LEVEL"; rms: number }
+  | { type: "DRAW_CONTROL"; action: "open" | "close" | "toggle" }
+  | { type: "OPEN_SIDEPANEL"; tab?: string }
   | { type: "PERMISSIONS_GRANTED"; afterAction?: "dictation" | "recording" };

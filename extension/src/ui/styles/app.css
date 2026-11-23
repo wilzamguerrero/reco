@@ -101,7 +101,7 @@
 /* Brutalist icon-first tab bar */
 .tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 4px;
 }
 
@@ -161,6 +161,12 @@
 .tab.is-active.tab-notion {
   background: var(--fg);
   border-color: var(--fg);
+  color: var(--ink);
+}
+
+.tab.is-active.tab-ia {
+  background: var(--ochre);
+  border-color: var(--ochre);
   color: var(--ink);
 }
 

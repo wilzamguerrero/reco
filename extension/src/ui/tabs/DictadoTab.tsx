@@ -135,14 +135,14 @@ export function DictadoTab({
 
         <button
           type="button"
-          className="action-primary action-violet"
+          className={`action-primary ${live.aiVoicePhase !== "idle" ? "action-red" : "action-violet"}`}
           style={{ padding: "10px 8px", flexDirection: "column", gap: 4 }}
-          title={`Hablar con RECO IA en ventana flotante (${aiShortcut || "Sin atajo"})`}
-          onClick={() => void send({ type: "OPEN_FLOATING_CHAT", autoVoice: true })}
+          title={`Hablar con RECO IA manos libres sin abrir ventana (${aiShortcut || "Sin atajo"})`}
+          onClick={() => void send({ type: "AI_VOICE_TOGGLE" })}
         >
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <Icon name="spark" size={14} />
-            <span>Hablar IA</span>
+            <Icon name={live.aiVoicePhase !== "idle" ? "stop" : "spark"} size={14} />
+            <span>{live.aiVoicePhase !== "idle" ? "Parar IA" : "Hablar IA"}</span>
           </span>
           <kbd className="kbd">{aiShortcut || "Sin atajo"}</kbd>
         </button>

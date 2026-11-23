@@ -1,14 +1,15 @@
 /**
- * Bridge de dictado continuo en segundo plano (pestaña fijada discreta).
- *
- * Corre en el origen propio de la extensión (`chrome-extension://<id>/`) para:
- *  - Usar un único permiso de micrófono permanente sin molestar en cada web.
- *  - Mantener el dictado vivo aunque el usuario cambie de pestaña o converse largo rato.
- *  - Enviar nivel RMS en tiempo real y frases finalizadas al Service Worker.
+ * Bridge en segundo plano de RECO (`chrome-extension://<id>/bridge.html`):
+ *  - Modo normal: dictado continuo al cursor (Chrome Speech o Whisper local).
+ *  - Modo `?mode=ai`: conversación fluida manos libres con RECO IA (sin abrir ventana
+ *    de chat!), con visión automática, ejecución de herramientas de RECO y respuesta
+ *    en voz natural (Kokoro / Piper / MOSS / Sistema).
  */
 
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { runRecoAgentTurn } from "../shared/aiAgent";
+import { speakReply, stopSpeaking } from "../shared/kokoroTts";
 import { createSpeechEngine, type SpeechEngineHandle } from "../shared/speechEngine";
 import { getConfig } from "../shared/storage";
 import type { ExtMessage } from "../shared/types";
@@ -16,20 +17,160 @@ import { createWhisperEngine } from "../shared/whisperEngine";
 import { Orb } from "../ui/components/Orb";
 import "../ui/styles/global.css";
 
+const IS_AI_MODE = new URLSearchParams(window.location.search).get("mode") === "ai";
+
 function BridgeApp() {
-  const [status, setStatus] = useState("Iniciando micrófono…");
+  const [status, setStatus] = useState(
+    IS_AI_MODE ? "Iniciando conversación con RECO IA…" : "Iniciando micrófono…",
+  );
   const [rms, setRms] = useState(0);
   const [lastLine, setLastLine] = useState("");
 
   useEffect(() => {
     let engine: SpeechEngineHandle | null = null;
     let disposed = false;
+    let aiBusy = false;
+    let pendingTranscript = "";
+    let turnTimer: number | null = null;
+    let abortCtrl: AbortController | null = null;
+
+    const sendAiPhase = (phase: "idle" | "listening" | "thinking" | "speaking", st?: string | null) => {
+      void chrome.runtime.sendMessage({
+        type: "AI_VOICE_PHASE",
+        phase,
+        status: st,
+      } satisfies ExtMessage);
+    };
+
+    async function runAiVoiceTurn(spokenText: string) {
+      if (disposed || aiBusy || !spokenText.trim()) return;
+      aiBusy = true;
+      engine?.stop();
+      setLastLine(spokenText);
+      setStatus("Pensando…");
+      sendAiPhase("thinking", "RECO pensando…");
+
+      abortCtrl = new AbortController();
+      try {
+        const cfg = await getConfig();
+        const res = await runRecoAgentTurn({
+          userText: spokenText,
+          signal: abortCtrl.signal,
+        });
+        if (disposed) return;
+
+        setLastLine(res.text);
+        if (res.text && cfg.ai.ttsMode !== "off") {
+          setStatus("Respondiendo por voz…");
+          sendAiPhase("speaking", null);
+          await speakReply({
+            text: res.text,
+            mode: cfg.ai.ttsMode,
+            voice: cfg.ai.ttsVoice,
+            onStatus(s) {
+              if (s) {
+                setStatus(s);
+                sendAiPhase("speaking", s);
+              }
+            },
+          });
+        }
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus(msg);
+          void chrome.runtime.sendMessage({
+            type: "DICTATION_ERROR",
+            message: msg,
+            fatal: false,
+          } satisfies ExtMessage);
+        }
+      } finally {
+        aiBusy = false;
+        if (!disposed) {
+          setStatus("Escuchando… habla con RECO IA");
+          sendAiPhase("listening", null);
+          void engine?.start().catch(() => {});
+        }
+      }
+    }
 
     async function boot() {
       void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
       const cfg = await getConfig();
       if (disposed) return;
 
+      if (IS_AI_MODE) {
+        const aiCallbacks = {
+          language: cfg.dictation.language,
+          polish: cfg.dictation.polish,
+          autoCapitalize: true,
+          onReady() {
+            setStatus("Escuchando… habla con RECO IA");
+            sendAiPhase("listening", null);
+          },
+          onLevel(level: number) {
+            setRms(level);
+            if (!aiBusy) {
+              void chrome.runtime.sendMessage({ type: "AI_VOICE_LEVEL", rms: level } satisfies ExtMessage);
+            }
+          },
+          onInterim(text: string) {
+            if (text.trim() && turnTimer !== null) {
+              clearTimeout(turnTimer);
+              turnTimer = null;
+            }
+          },
+          onFinal(text: string) {
+            if (aiBusy || !text.trim()) return;
+            pendingTranscript = pendingTranscript ? `${pendingTranscript} ${text}` : text;
+            if (turnTimer !== null) clearTimeout(turnTimer);
+            // Small pause to let user finish multi-clause thought before RECO replies
+            turnTimer = window.setTimeout(() => {
+              const phrase = pendingTranscript.trim();
+              pendingTranscript = "";
+              turnTimer = null;
+              if (phrase) void runAiVoiceTurn(phrase);
+            }, cfg.dictation.engine === "chrome" ? 850 : 250);
+          },
+          onError(message: string, fatal: boolean) {
+            setStatus(message);
+            void chrome.runtime.sendMessage({
+              type: "DICTATION_ERROR",
+              message,
+              fatal,
+            } satisfies ExtMessage);
+          },
+        };
+
+        engine =
+          cfg.dictation.engine === "chrome"
+            ? createSpeechEngine(aiCallbacks)
+            : createWhisperEngine({
+                ...aiCallbacks,
+                model: cfg.dictation.engine,
+                onStatus(s) {
+                  setStatus(s);
+                  sendAiPhase("thinking", s || null);
+                },
+              });
+
+        try {
+          await engine.start();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          setStatus(msg);
+          void chrome.runtime.sendMessage({
+            type: "DICTATION_ERROR",
+            message: msg,
+            fatal: true,
+          } satisfies ExtMessage);
+          void chrome.runtime.sendMessage({ type: "AI_VOICE_STOP" } satisfies ExtMessage);
+        }
+        return;
+      }
+
+      // Normal cursor dictation mode
       const engineCallbacks = {
         language: cfg.dictation.language,
         polish: cfg.dictation.polish,
@@ -51,10 +192,7 @@ function BridgeApp() {
           void chrome.runtime.sendMessage({ type: "DICTATION_INTERIM", text } satisfies ExtMessage);
         },
         onLive(payload: Parameters<NonNullable<Parameters<typeof createSpeechEngine>[0]["onLive"]>>[0]) {
-          void chrome.runtime.sendMessage({
-            type: "DICTATION_LIVE",
-            payload,
-          } satisfies ExtMessage);
+          void chrome.runtime.sendMessage({ type: "DICTATION_LIVE", payload } satisfies ExtMessage);
         },
         onFinal(text: string) {
           setLastLine(text);
@@ -103,7 +241,13 @@ function BridgeApp() {
     }
 
     const listener = (msg: ExtMessage) => {
-      if (msg.type === "DICTATION_STOP") {
+      if (msg.type === "DICTATION_STOP" && !IS_AI_MODE) {
+        engine?.stop();
+      } else if (msg.type === "AI_VOICE_STOP" && IS_AI_MODE) {
+        disposed = true;
+        if (turnTimer !== null) clearTimeout(turnTimer);
+        abortCtrl?.abort();
+        stopSpeaking();
         engine?.stop();
       } else if (msg.type === "CONFIG_UPDATED") {
         engine?.updateOptions({
@@ -119,6 +263,9 @@ function BridgeApp() {
 
     return () => {
       disposed = true;
+      if (turnTimer !== null) clearTimeout(turnTimer);
+      abortCtrl?.abort();
+      stopSpeaking();
       chrome.runtime.onMessage.removeListener(listener);
       engine?.stop();
     };
@@ -131,18 +278,18 @@ function BridgeApp() {
         display: "grid",
         placeItems: "center",
         padding: 24,
-        background: "#000",
-        color: "#f2ecec",
+        background: "#08080a",
+        color: "#eae5d9",
       }}
     >
       <div
         style={{
           width: "100%",
-          maxWidth: 420,
+          maxWidth: 400,
           padding: 20,
-          borderRadius: 14,
-          border: "1px solid #232025",
-          background: "#0a0a0b",
+          borderRadius: 4,
+          border: "1.5px solid #2a2a32",
+          background: "#111114",
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
@@ -150,21 +297,20 @@ function BridgeApp() {
           textAlign: "center",
         }}
       >
-        <Orb size={64} state="dictation" level={rms} />
-        <div style={{ fontWeight: 650, letterSpacing: "0.08em", fontSize: 13 }}>
-          RECO · DICTADO ACTIVO
+        <Orb size={56} state={IS_AI_MODE ? "ai_listening" : "dictation"} level={rms} />
+        <div style={{ fontWeight: 800, letterSpacing: "0.1em", fontSize: 12, fontFamily: "var(--mono)" }}>
+          {IS_AI_MODE ? "RECO · VOZ IA ACTIVA" : "RECO · DICTADO ACTIVO"}
         </div>
-        <div style={{ fontSize: 12, color: "#968d92" }}>{status}</div>
+        <div style={{ fontSize: 12, color: "#9a958d" }}>{status}</div>
         {lastLine && (
           <div
             style={{
               width: "100%",
               padding: "8px 10px",
-              borderRadius: 9,
-              background: "#060607",
-              border: "1px solid #171416",
-              fontSize: 12,
-              color: "#a5f3fc",
+              borderRadius: 3,
+              background: "#050507",
+              border: "1.5px solid #1d1d23",
+              fontSize: 11.5,
             }}
           >
             {lastLine}
@@ -173,15 +319,12 @@ function BridgeApp() {
         <button
           type="button"
           onClick={() =>
-            void chrome.runtime.sendMessage({ type: "DICTATION_STOP" } satisfies ExtMessage)
+            void chrome.runtime.sendMessage({
+              type: IS_AI_MODE ? "AI_VOICE_STOP" : "DICTATION_STOP",
+            } satisfies ExtMessage)
           }
-          style={{
-            borderColor: "rgba(34,211,238,0.45)",
-            background: "rgba(34,211,238,0.14)",
-            color: "#a5f3fc",
-          }}
         >
-          Detener dictado
+          Detener
         </button>
       </div>
     </div>

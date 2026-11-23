@@ -1,9 +1,15 @@
-import type { AppConfig, DictationNote, RecordingItem } from "./types";
+import type {
+  AppConfig,
+  DictationNote,
+  PersistedChatMessage,
+  RecordingItem,
+} from "./types";
 
 const CONFIG_KEY = "reco_ext_config_v1";
 const RECORDINGS_KEY = "reco_ext_recordings_v1";
 const DICTATION_HISTORY_KEY = "reco_ext_dictation_history_v1";
 const CACHED_MODELS_KEY = "reco_ext_cached_models_v1";
+const CHAT_MESSAGES_KEY = "reco_ext_chat_messages_v1";
 
 export const DEFAULT_CONFIG: AppConfig = {
   dictation: {
@@ -146,4 +152,28 @@ export async function markModelCached(modelKey: string): Promise<void> {
   const cur = await getCachedModels();
   if (cur[modelKey]) return;
   await chrome.storage.local.set({ [CACHED_MODELS_KEY]: { ...cur, [modelKey]: true } });
+}
+
+export async function getChatMessages(): Promise<PersistedChatMessage[]> {
+  const data = await chrome.storage.local.get(CHAT_MESSAGES_KEY);
+  const raw = data[CHAT_MESSAGES_KEY];
+  return Array.isArray(raw) ? (raw as PersistedChatMessage[]) : [];
+}
+
+export async function saveChatMessages(msgs: PersistedChatMessage[]): Promise<void> {
+  // Strip large base64 images beyond the last 4 messages to keep storage lean
+  const trimmed = msgs.slice(-30).map((m, idx, arr) => {
+    if (idx < arr.length - 4 && m.attachments?.length) {
+      return {
+        ...m,
+        attachments: m.attachments.map((a) => ({ ...a, dataUrl: undefined })),
+      };
+    }
+    return m;
+  });
+  await chrome.storage.local.set({ [CHAT_MESSAGES_KEY]: trimmed });
+}
+
+export async function clearChatMessages(): Promise<void> {
+  await chrome.storage.local.set({ [CHAT_MESSAGES_KEY]: [] });
 }
