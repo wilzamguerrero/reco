@@ -19,6 +19,7 @@ import {
   POCKET_VOICES,
   speakReply,
   stopSpeaking,
+  updateSpeakingVoice,
   SUPERTONIC_VOICES,
   type VoiceOption,
 } from "../../shared/kokoroTts";
@@ -200,12 +201,11 @@ export function IaTab({
                 : [];
 
   useEffect(() => {
-    stopSpeaking();
+    updateSpeakingVoice(ai);
     setTtsStatus(null);
   }, [ai.ttsMode, ai.ttsVoice, ai.ttsSpeed, ai.pocketWebLanguage]);
 
   function switchTtsMode(next: TtsEngineMode) {
-    stopSpeaking();
     const nextVoice =
       next === "pocket-web" ? "lola" :
       next === "supertonic"
@@ -434,7 +434,6 @@ export function IaTab({
               className="chat-select"
               value={ai.ttsVoice}
               onChange={(e) => {
-                stopSpeaking();
                 void updateConfig({ ai: { ...ai, ttsVoice: e.target.value,
                   pocketWebLanguage: ai.ttsMode === "pocket-web" ? language : ai.pocketWebLanguage } });
               }}

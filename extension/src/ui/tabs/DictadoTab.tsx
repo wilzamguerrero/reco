@@ -8,9 +8,11 @@ import type {
   LiveState,
   SpeechEngineType,
 } from "../../shared/types";
+import { WISPR_SESSION_KEY } from "../../shared/wisprEngine";
 import { Icon } from "../components/Icon";
 
 const ENGINES: { id: SpeechEngineType; label: string; tip: string }[] = [
+  { id: "wispr", label: "WISPR FLOW", tip: "Transcribir con Wispr Flow en la nube" },
   { id: "chrome", label: "CHROME", tip: "Web Speech en tiempo real (0 MB, multilingüe)" },
   { id: "whisper_tiny", label: "WHISPER S", tip: "Whisper Tiny local (multilingüe ES/EN, ~40 MB, offline)" },
   { id: "whisper_base", label: "WHISPER M", tip: "Whisper Base local (multilingüe ES/EN, ~75 MB, más preciso)" },
@@ -55,6 +57,11 @@ export function DictadoTab({
   const [nativeTesting, setNativeTesting] = useState(false);
   const [nativeStatusMsg, setNativeStatusMsg] = useState<string | null>(null);
   const [cachedModels, setCachedModels] = useState<Record<string, boolean>>({});
+  const [wisprKey, setWisprKey] = useState("");
+  const [hasWisprKey, setHasWisprKey] = useState(false);
+  useEffect(() => {
+    void chrome.storage.session.get(WISPR_SESSION_KEY).then(data => setHasWisprKey(Boolean(data[WISPR_SESSION_KEY])));
+  }, []);
   const d = config.dictation;
   const listening = live.dictationPhase === "listening";
   const extId = chrome.runtime.id;
@@ -261,6 +268,25 @@ export function DictadoTab({
         </div>
       </div>
 
+      {d.engine === "wispr" && (
+        <div className="pane-col">
+          <label className="pane-label" htmlFor="wispr-key">Clave API de Wispr Flow</label>
+          <div className="pane-row">
+            <input id="wispr-key" type="password" autoComplete="off" className="chat-input"
+              placeholder={hasWisprKey ? "Clave guardada para esta sesi\u00f3n" : "fl-..."}
+              value={wisprKey} onChange={e => setWisprKey(e.target.value)} />
+            <button type="button" className="btn-xs" disabled={!wisprKey.trim() && !hasWisprKey}
+              onClick={async () => {
+                const key = wisprKey.trim();
+                if (key) await chrome.storage.session.set({ [WISPR_SESSION_KEY]: key });
+                else await chrome.storage.session.remove(WISPR_SESSION_KEY);
+                setHasWisprKey(Boolean(key));
+                setWisprKey("");
+              }}>{hasWisprKey && !wisprKey.trim() ? "Quitar" : "Guardar"}</button>
+          </div>
+          <span className="pane-hint">RECO envía el audio del dictado a Wispr Flow.</span>
+        </div>
+      )}
       <div className="pane-row">
         <Icon name="globe" size={14} style={{ color: "var(--fg-muted)", flexShrink: 0 }} />
         <div className="chips" style={{ marginLeft: 0, flex: 1, justifyContent: "space-between" }}>

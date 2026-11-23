@@ -6,6 +6,7 @@ import {
   getDictationHistory,
   getRecordings,
   patchConfig,
+  watchConfig,
   removeDictationNote,
 } from "../../shared/storage";
 import type {
@@ -80,7 +81,12 @@ export function useRecoState() {
   const [shortcuts, setShortcuts] = useState<ShortcutMap>(INITIAL_SHORTCUTS);
 
   useEffect(() => {
-    void getConfig().then(setConfig);
+    let hasUpdate = false;
+    const unwatch = watchConfig(next => {
+      hasUpdate = true;
+      setConfig(next);
+    });
+    void getConfig().then(initial => { if (!hasUpdate) setConfig(initial); });
     void getRecordings().then(setRecordings);
     void getDictationHistory().then(setDictationHistory);
     void readChromeShortcuts().then(setShortcuts);
@@ -99,9 +105,6 @@ export function useRecoState() {
     };
 
     const onStorage = (changes: Record<string, chrome.storage.StorageChange>) => {
-      if (changes.reco_ext_config_v1) {
-        void getConfig().then(setConfig);
-      }
       if (changes.reco_ext_recordings_v1) {
         void getRecordings().then(setRecordings);
       }
@@ -118,6 +121,8 @@ export function useRecoState() {
     chrome.storage.onChanged.addListener(onStorage);
     window.addEventListener("focus", onFocus);
     return () => {
+      hasUpdate = true;
+      unwatch();
       chrome.runtime.onMessage.removeListener(onMsg);
       chrome.storage.onChanged.removeListener(onStorage);
       window.removeEventListener("focus", onFocus);
@@ -126,7 +131,6 @@ export function useRecoState() {
 
   const updateConfig = useCallback(async (patch: Partial<AppConfig>) => {
     const next = await patchConfig(patch);
-    setConfig(next);
     void chrome.runtime.sendMessage({ type: "CONFIG_UPDATED", config: next } satisfies ExtMessage);
     return next;
   }, []);

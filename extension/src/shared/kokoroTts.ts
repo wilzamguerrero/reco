@@ -12,7 +12,7 @@
 import { getCustomVoicePcm } from "./storage";
 import { hasKyutaiServer, pocketLanguage, pocketWebVoices, streamKyutai, type PocketWebLanguage } from "./kyutaiPocket";
 import { SUPERTONIC_VOICES, synthesizeSupertonicSentence } from "./supertonicTts";
-import type { TtsEngineMode } from "./types";
+import type { AiAssistantConfig, TtsEngineMode } from "./types";
 
 export { SUPERTONIC_VOICES };
 
@@ -506,6 +506,11 @@ export function isPlaybackEcho(text: string): boolean {
 }
 
 export function stopSpeaking(): void {
+  activeReply = null;
+  cancelPlayback();
+}
+
+function cancelPlayback(): void {
   spokenWords = "";
   speakSeq += 1;
   try {
@@ -628,10 +633,50 @@ type SpeechOptions = {
 // access to that model while allowing a different model to start immediately.
 const modelJobs = new Map<TtsEngineMode, Promise<void>>();
 
+type ActiveReply = { options: SpeechOptions; remaining: string };
+let activeReply: ActiveReply | null = null;
+
+export function updateSpeakingVoice(ai: AiAssistantConfig): void {
+  const reply = activeReply;
+  if (!reply) return;
+  const old = reply.options;
+  if (old.mode === ai.ttsMode && old.voice === ai.ttsVoice &&
+      old.speed === ai.ttsSpeed && old.pocketWebLanguage === ai.pocketWebLanguage) return;
+  if (ai.ttsMode === "off") { stopSpeaking(); return; }
+  reply.options = {
+    ...old, mode: ai.ttsMode, voice: ai.ttsVoice,
+    speed: ai.ttsSpeed, pocketWebLanguage: ai.pocketWebLanguage,
+  };
+  cancelPlayback();
+}
+
 export async function speakReply(opts: SpeechOptions): Promise<void> {
   stopSpeaking();
   const text = stripMarkdownForSpeech(opts.text);
   if (!text || opts.mode === "off") return;
+  const reply: ActiveReply = { options: opts, remaining: text };
+  activeReply = reply;
+  try {
+    while (activeReply === reply && reply.remaining) {
+      const options = reply.options;
+      // These engines take a whole passage without word timing. Bound their
+      // restart point while preserving the native players' sentence lookahead.
+      const passage = options.mode === "system" || options.mode === "pocket"
+        ? splitIntoSentences(reply.remaining, 320)[0] : reply.remaining;
+      const afterPassage = reply.remaining.slice(passage.length).trimStart();
+      const commit = (part: string) => {
+        if (activeReply !== reply || reply.options !== options) return;
+        reply.remaining = reply.remaining.slice(part.length).trimStart();
+      };
+      await playReply(options, passage, commit);
+      if (activeReply === reply && reply.options === options) reply.remaining = afterPassage;
+    }
+  } finally {
+    if (activeReply === reply) activeReply = null;
+  }
+}
+
+async function playReply(opts: SpeechOptions, text: string, commit: (part: string) => void): Promise<void> {
   spokenWords = ` ${normalizeWords(text)} `;
   echoUntil = Infinity;
   const seq = speakSeq;
@@ -643,7 +688,12 @@ export async function speakReply(opts: SpeechOptions): Promise<void> {
     if (seq === speakSeq) opts.onStatus?.(message);
   };
   const sentences = splitIntoSentences(text, opts.mode === "moss" ? 450 : 180);
-  let played = 0;
+  let spokenLength = 0;
+  const played = (part: string) => {
+    if (signal.aborted) return;
+    spokenLength += part.length + 1;
+    commit(part);
+  };
   async function run() {
     signal.throwIfAborted();
     if (opts.mode === "system") return speakSystem(text, opts.voice, speed);
@@ -660,14 +710,20 @@ export async function speakReply(opts: SpeechOptions): Promise<void> {
         let drained = Promise.resolve();
         const scheduled: { until: number; done: Promise<void> }[] = [];
         try {
-          for await (const { pcm, rate } of streamKyutai(text, selected, signal, web ? pocketLanguage(opts.pocketWebLanguage, selected) : undefined)) {
+          const sections = web ? sentences : [text];
+          for (const section of sections) {
             signal.throwIfAborted();
-            if (end <= ctx.currentTime) end = ctx.currentTime + 0.18;
-            drained = schedulePcm(pcm, rate * speed, end);
-            end += pcm.length / (rate * speed);
-            scheduled.push({ until: end, done: drained });
-            while (scheduled.length && scheduled[0].until <= ctx.currentTime) scheduled.shift();
-            if (end - ctx.currentTime > 5) await scheduled.find(chunk => chunk.until >= end - 3)?.done;
+            for await (const { pcm, rate } of streamKyutai(section, selected, signal, web ? pocketLanguage(opts.pocketWebLanguage, selected) : undefined)) {
+              signal.throwIfAborted();
+              if (end <= ctx.currentTime) end = ctx.currentTime + 0.18;
+              drained = schedulePcm(pcm, rate * speed, end);
+              end += pcm.length / (rate * speed);
+              scheduled.push({ until: end, done: drained });
+              while (scheduled.length && scheduled[0].until <= ctx.currentTime) scheduled.shift();
+              if (end - ctx.currentTime > 5) await scheduled.find(chunk => chunk.until >= end - 3)?.done;
+            }
+            // Commit only when this passage actually finishes playing.
+            drained = drained.then(() => played(section));
           }
           await drained;
           return;
@@ -675,8 +731,7 @@ export async function speakReply(opts: SpeechOptions): Promise<void> {
           signal.throwIfAborted();
           if (end) {
             await drained;
-            status("Se interrumpió la conexión con Pocket");
-            return;
+            throw err;
           }
           if (web) throw err;
           status("Preparando Pocket en el navegador…");
@@ -800,7 +855,7 @@ export async function speakReply(opts: SpeechOptions): Promise<void> {
     let play = await prepare(sentences[0]);
     for (let i = 0; i < sentences.length; i++) {
       signal.throwIfAborted();
-      const playback = play().then(() => { played++; });
+      const playback = play().then(() => played(sentences[i]));
       const [audio, next] = await Promise.allSettled([
         playback, i + 1 < sentences.length ? prepare(sentences[i + 1]) : undefined,
       ] as const);
@@ -810,10 +865,11 @@ export async function speakReply(opts: SpeechOptions): Promise<void> {
     }
   }
 
-  const job = (modelJobs.get(opts.mode) ?? Promise.resolve()).then(run).catch(async (err) => {
+  const previous = opts.mode === "pocket-web" || opts.mode === "system" ? undefined : modelJobs.get(opts.mode);
+  const job = (previous ?? Promise.resolve()).then(run).catch(async (err) => {
     if (signal.aborted) return;
     status(`${opts.mode}: usando voz del sistema (${String(err).slice(0, 65)})`);
-    const remaining = sentences.slice(played).join(" ");
+    const remaining = text.slice(spokenLength);
     if (remaining) await speakSystem(remaining, undefined, speed);
   });
   modelJobs.set(opts.mode, job);

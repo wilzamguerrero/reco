@@ -64,6 +64,7 @@ export const DEFAULT_CONFIG: AppConfig = {
 function mergeConfig(raw: Partial<AppConfig> | undefined): AppConfig {
   const mergedDict = { ...DEFAULT_CONFIG.dictation, ...(raw?.dictation ?? {}) };
   if (
+    mergedDict.engine !== "wispr" &&
     mergedDict.engine !== "chrome" &&
     mergedDict.engine !== "whisper_tiny" &&
     mergedDict.engine !== "whisper_base"
@@ -82,6 +83,16 @@ function mergeConfig(raw: Partial<AppConfig> | undefined): AppConfig {
 export async function getConfig(): Promise<AppConfig> {
   const data = await chrome.storage.local.get(CONFIG_KEY);
   return mergeConfig(data[CONFIG_KEY] as Partial<AppConfig> | undefined);
+}
+
+export function watchConfig(onChange: (config: AppConfig) => void): () => void {
+  const listener = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+    if (area === "local" && changes[CONFIG_KEY]) {
+      onChange(mergeConfig(changes[CONFIG_KEY].newValue));
+    }
+  };
+  chrome.storage.onChanged.addListener(listener);
+  return () => chrome.storage.onChanged.removeListener(listener);
 }
 
 export async function patchConfig(patch: Partial<AppConfig>): Promise<AppConfig> {

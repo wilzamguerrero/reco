@@ -340,6 +340,9 @@ async function openPermissionsTab(afterAction?: "dictation" | "recording") {
 
 /* ------------------------------------------------------------------ DICTADO */
 
+let wisprDictation = false;
+let stoppingDictation: Promise<void> | undefined;
+
 async function startDictation(explicitTabId?: number) {
   if (state.dictationPhase === "listening") return;
 
@@ -354,6 +357,7 @@ async function startDictation(explicitTabId?: number) {
 
   // Intentar conectar host nativo en silencio por si el usuario dicta fuera de Chrome
   const cfg = await getConfig();
+  wisprDictation = cfg.dictation.engine === "wispr";
   if (cfg.dictation.desktopTyping) {
     void ensureNativePort();
   }
@@ -368,7 +372,7 @@ async function startDictation(explicitTabId?: number) {
     dictationInterim: "",
     dictationTranscript: "",
     dictationStatus:
-      cfg.dictation.engine === "chrome" ? null : "Preparando modelo local…",
+      cfg.dictation.engine === "wispr" ? "Conectando con Wispr Flow" : cfg.dictation.engine === "chrome" ? null : "Preparando modelo local…",
     dictationError: null,
     dictationLevel: 0,
   };
@@ -394,9 +398,19 @@ async function startDictation(explicitTabId?: number) {
   state.dictationHostTabId = bridgeTabId;
 }
 
-async function stopDictation() {
+function stopDictation() {
+  if (!stoppingDictation) stoppingDictation = finishDictation().finally(() => { stoppingDictation = undefined; });
+  return stoppingDictation;
+}
+
+async function finishDictation() {
   if (state.dictationPhase === "idle" && bridgeTabId === null) return;
-  void chrome.runtime.sendMessage({ type: "DICTATION_STOP" } satisfies ExtMessage).catch(() => {});
+  if (wisprDictation && bridgeTabId !== null) {
+    await chrome.runtime.sendMessage({ type: "DICTATION_FLUSH" } satisfies ExtMessage).catch(() => {});
+  } else {
+    void chrome.runtime.sendMessage({ type: "DICTATION_STOP" } satisfies ExtMessage).catch(() => {});
+  }
+  wisprDictation = false;
 
   const tabToClose = bridgeTabId;
   bridgeTabId = null;

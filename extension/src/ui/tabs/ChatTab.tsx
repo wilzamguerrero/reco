@@ -6,7 +6,8 @@ import {
   fetchProviderModels,
   type FreePiModel,
 } from "../../shared/freepiClient";
-import { isPlaybackEcho, speakReply, stopSpeaking } from "../../shared/kokoroTts";
+import { isPlaybackEcho, speakReply, stopSpeaking, updateSpeakingVoice } from "../../shared/kokoroTts";
+import { createWisprEngine } from "../../shared/wisprEngine";
 import { createSpeechEngine, type SpeechEngineHandle } from "../../shared/speechEngine";
 import { clearChatMessages, getChatMessages } from "../../shared/storage";
 import type {
@@ -38,7 +39,7 @@ export function ChatTab({
   const currentAi = useRef(ai);
   currentAi.current = ai;
   useEffect(() => {
-    stopSpeaking();
+    updateSpeakingVoice(ai);
     setTtsStatus(null);
   }, [ai.ttsMode, ai.ttsVoice, ai.ttsSpeed, ai.pocketWebLanguage]);
   const provider: AiProviderId = ai.provider || "freepi";
@@ -263,7 +264,8 @@ export function ChatTab({
       setTtsStatus(null);
     }
     let loudSince = 0;
-    const eng = createSpeechEngine({
+    const makeEngine = config.dictation.engine === "wispr" ? createWisprEngine : createSpeechEngine;
+    const eng = makeEngine({
       language: config.dictation.language,
       polish: config.dictation.polish,
       onLevel(level) {

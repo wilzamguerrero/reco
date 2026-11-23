@@ -9,10 +9,11 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { runRecoAgentTurn } from "../shared/aiAgent";
-import { isPlaybackEcho, speakReply, stopSpeaking } from "../shared/kokoroTts";
+import { isPlaybackEcho, speakReply, stopSpeaking, updateSpeakingVoice } from "../shared/kokoroTts";
+import { createWisprEngine } from "../shared/wisprEngine";
 import { createSpeechEngine, type SpeechEngineHandle } from "../shared/speechEngine";
-import { getConfig } from "../shared/storage";
-import type { ExtMessage } from "../shared/types";
+import { getConfig, watchConfig } from "../shared/storage";
+import type { AiAssistantConfig, ExtMessage } from "../shared/types";
 import { createWhisperEngine } from "../shared/whisperEngine";
 import { Orb } from "../ui/components/Orb";
 import "../ui/styles/global.css";
@@ -33,9 +34,8 @@ function BridgeApp() {
     let pendingTranscript = "";
     let turnTimer: number | null = null;
     let abortCtrl: AbortController | null = null;
-    let voiceSettings: Awaited<ReturnType<typeof getConfig>>["ai"] | undefined;
+    let voiceSettings: AiAssistantConfig | undefined;
     let loudSince = 0;
-    let speaking = false;
 
     const sendAiPhase = (phase: "idle" | "listening" | "thinking" | "speaking", st?: string | null) => {
       void chrome.runtime.sendMessage({
@@ -49,7 +49,6 @@ function BridgeApp() {
       abortCtrl?.abort();
       abortCtrl = null;
       stopSpeaking();
-      speaking = false;
       aiBusy = false;
       loudSince = 0;
       setStatus("Te escucho...");
@@ -57,7 +56,7 @@ function BridgeApp() {
     }
 
     async function runAiVoiceTurn(spokenText: string) {
-      if (disposed || aiBusy || !spokenText.trim()) return;
+      if (disposed || aiBusy || !voiceSettings || !spokenText.trim()) return;
       aiBusy = true;
       loudSince = 0;
       setLastLine(spokenText);
@@ -67,14 +66,9 @@ function BridgeApp() {
       const turn = new AbortController();
       abortCtrl = turn;
       try {
-        const initial = await getConfig();
-        if (turn.signal.aborted || disposed) return;
-        voiceSettings = initial.ai;
         let opening = "";
         let openingAudio: Promise<void> | undefined;
-        const readAloud = (text: string, ai: typeof initial.ai) => {
-          voiceSettings = ai;
-          speaking = true;
+        const readAloud = (text: string, ai: AiAssistantConfig) => {
           setStatus("Respondiendo por voz...");
           sendAiPhase("speaking", null);
           return speakReply({
@@ -90,21 +84,20 @@ function BridgeApp() {
           userText: spokenText,
           signal: turn.signal,
           onDelta(text) {
-            if (disposed || turn.signal.aborted || opening || voiceSettings?.ttsMode === "off") return;
+            if (disposed || turn.signal.aborted || opening || !voiceSettings || voiceSettings.ttsMode === "off") return;
             const sentence = text.match(/^(.+?[.!?\u2026])\s/u)?.[1];
             if (!sentence || /[`\[\]]/.test(sentence)) return;
             opening = sentence;
-            openingAudio = readAloud(opening, voiceSettings ?? initial.ai);
+            openingAudio = readAloud(opening, voiceSettings);
           },
         });
         if (disposed || turn.signal.aborted) return;
         setLastLine(res.text);
         await openingAudio;
-        const cfg = await getConfig();
-        if (disposed || turn.signal.aborted || cfg.ai.ttsMode === "off") return;
+        if (disposed || turn.signal.aborted || voiceSettings.ttsMode === "off") return;
         const rest = opening && res.text.startsWith(opening)
           ? res.text.slice(opening.length).trim() : res.text;
-        if (rest) await readAloud(rest, cfg.ai);
+        if (rest) await readAloud(rest, voiceSettings);
       } catch (err) {
         if (abortCtrl === turn) stopSpeaking();
         if (!disposed && !turn.signal.aborted && !(err instanceof DOMException && err.name === "AbortError")) {
@@ -120,7 +113,6 @@ function BridgeApp() {
         if (abortCtrl === turn && !disposed) {
           abortCtrl = null;
           aiBusy = false;
-          speaking = false;
           loudSince = 0;
           setStatus("Te escucho...");
           sendAiPhase("listening", null);
@@ -133,6 +125,7 @@ function BridgeApp() {
       const cfg = await getConfig();
       if (disposed) return;
 
+      voiceSettings ??= cfg.ai;
       if (IS_AI_MODE) {
         const aiCallbacks = {
           language: cfg.dictation.language,
@@ -188,6 +181,7 @@ function BridgeApp() {
         };
 
         engine =
+          cfg.dictation.engine === "wispr" ? createWisprEngine(aiCallbacks) :
           cfg.dictation.engine === "chrome"
             ? createSpeechEngine(aiCallbacks)
             : createWhisperEngine({
@@ -223,7 +217,7 @@ function BridgeApp() {
           setStatus(
             cfg.dictation.engine === "chrome"
               ? "Escuchando (Chrome) · Coloca el cursor donde quieras escribir"
-              : "Escuchando (Whisper local) · Habla y haz micro-pausas",
+              : cfg.dictation.engine === "wispr" ? "Escuchando con Wispr Flow" : "Escuchando (Whisper local) · Habla y haz micro-pausas",
           );
           void chrome.runtime.sendMessage({ type: "DICTATION_STATUS", status: null } satisfies ExtMessage);
           void chrome.runtime.sendMessage({ type: "DICTATION_BRIDGE_READY" } satisfies ExtMessage);
@@ -256,7 +250,8 @@ function BridgeApp() {
       };
 
       engine =
-        cfg.dictation.engine === "chrome"
+        cfg.dictation.engine === "wispr" ? createWisprEngine(engineCallbacks) :
+          cfg.dictation.engine === "chrome"
           ? createSpeechEngine(engineCallbacks)
           : createWhisperEngine({
               ...engineCallbacks,
@@ -272,7 +267,7 @@ function BridgeApp() {
 
       try {
         await engine.start();
-        setStatus("Conectando reconocimiento de voz…");
+        if (cfg.dictation.engine === "chrome") setStatus("Conectando reconocimiento de voz…");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setStatus(msg);
@@ -284,7 +279,11 @@ function BridgeApp() {
       }
     }
 
-    const listener = (msg: ExtMessage) => {
+    const listener = (msg: ExtMessage, _sender: chrome.runtime.MessageSender, respond: () => void) => {
+      if (msg.type === "DICTATION_FLUSH" && !IS_AI_MODE) {
+        void Promise.resolve(engine?.stop()).finally(respond);
+        return true;
+      }
       if (msg.type === "DICTATION_STOP" && !IS_AI_MODE) {
         engine?.stop();
       } else if (msg.type === "AI_VOICE_STOP" && IS_AI_MODE) {
@@ -293,22 +292,18 @@ function BridgeApp() {
         abortCtrl?.abort();
         stopSpeaking();
         engine?.stop();
-      } else if (msg.type === "CONFIG_UPDATED") {
-        if (speaking && voiceSettings && (
-          voiceSettings.ttsMode !== msg.config.ai.ttsMode ||
-          voiceSettings.ttsVoice !== msg.config.ai.ttsVoice ||
-          voiceSettings.pocketWebLanguage !== msg.config.ai.pocketWebLanguage ||
-          voiceSettings.ttsSpeed !== msg.config.ai.ttsSpeed
-        )) interruptTurn();
-        voiceSettings = msg.config.ai;
-        engine?.updateOptions({
-          language: msg.config.dictation.language,
-          polish: msg.config.dictation.polish,
-          autoCapitalize: msg.config.dictation.autoCapitalize,
-        });
       }
     };
 
+    const unwatch = watchConfig(config => {
+      voiceSettings = config.ai;
+      updateSpeakingVoice(config.ai);
+      engine?.updateOptions({
+        language: config.dictation.language,
+        polish: config.dictation.polish,
+        autoCapitalize: config.dictation.autoCapitalize,
+      });
+    });
     chrome.runtime.onMessage.addListener(listener);
     void boot();
 
@@ -317,6 +312,7 @@ function BridgeApp() {
       if (turnTimer !== null) clearTimeout(turnTimer);
       abortCtrl?.abort();
       stopSpeaking();
+      unwatch();
       chrome.runtime.onMessage.removeListener(listener);
       engine?.stop();
     };

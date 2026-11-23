@@ -1,6 +1,6 @@
 export type DictationPhase = "idle" | "listening" | "inserting" | "error";
 
-export type SpeechEngineType = "chrome" | "whisper_tiny" | "whisper_base";
+export type SpeechEngineType = "wispr" | "chrome" | "whisper_tiny" | "whisper_base";
 
 export type RecordingPhase = "idle" | "recording" | "paused" | "uploading";
 
@@ -200,6 +200,7 @@ export type ExtMessage =
   | { type: "DICTATION_TOGGLE"; targetTabId?: number }
   | { type: "DICTATION_START"; targetTabId?: number }
   | { type: "DICTATION_STOP" }
+  | { type: "DICTATION_FLUSH" }
   | { type: "DICTATION_BRIDGE_READY"; tabId?: number }
   | { type: "DICTATION_STATUS"; status: string | null }
   | { type: "DICTATION_INTERIM"; text: string }
