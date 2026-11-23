@@ -20,7 +20,10 @@ export type IconName =
   | "desktop"
   | "globe"
   | "bolt"
-  | "audio";
+  | "audio"
+  | "eye"
+  | "clip"
+  | "send";
 
 /**
  * Íconos geométricos planos estilo Bauhaus / Neo-Brutalist.
@@ -190,6 +193,25 @@ export function Icon({
       return (
         <svg {...common}>
           <path d="M2.5 3.5h19v17h-19v-17Zm2.2 2.2v12.6h9.6V5.7H4.7Zm11.8 0v12.6h2.8V5.7h-2.8Z" />
+        </svg>
+      );
+    case "eye":
+      return (
+        <svg {...common}>
+          <path d="M2 12c2.5-4.5 6-6.8 10-6.8S19.5 7.5 22 12c-2.5 4.5-6 6.8-10 6.8S4.5 16.5 2 12Zm10 3.6a3.6 3.6 0 1 0 0-7.2 3.6 3.6 0 0 0 0 7.2Z" />
+          <circle cx="12" cy="12" r="1.7" />
+        </svg>
+      );
+    case "clip":
+      return (
+        <svg {...common}>
+          <path d="M7 13.5V7a5 5 0 0 1 10 0v8.5a3.5 3.5 0 0 1-7 0V8.5h2.2v7a1.3 1.3 0 0 0 2.6 0V7a2.8 2.8 0 0 0-5.6 0v6.5a5 5 0 0 0 10 0V8H21v5.5a7 7 0 0 1-14 0Z" />
+        </svg>
+      );
+    case "send":
+      return (
+        <svg {...common}>
+          <polygon points="3,4 21,12 3,20 6.5,12" />
         </svg>
       );
   }

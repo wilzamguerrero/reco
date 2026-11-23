@@ -70,10 +70,19 @@ export interface DictationNote {
   createdAt: number;
 }
 
+export interface AiAssistantConfig {
+  freepiToken: string;
+  freepiHandle: string;
+  model: string;
+  ttsMode: "kokoro" | "system" | "off";
+  ttsVoice: string;
+}
+
 export interface AppConfig {
   dictation: DictationConfig;
   recording: RecordingConfig;
   notion: NotionConfig;
+  ai: AiAssistantConfig;
   orbPosition: OrbPosition | null;
 }
 
@@ -186,5 +195,6 @@ export type ExtMessage =
     }
   | { type: "OFFSCREEN_RECORDING_ERROR"; recordingId: string; message: string }
   | { type: "OPEN_PERMISSIONS"; afterAction?: "dictation" | "recording" }
+  | { type: "CAPTURE_TAB_SCREEN" }
   | { type: "OPEN_SIDEPANEL" }
   | { type: "PERMISSIONS_GRANTED"; afterAction?: "dictation" | "recording" };

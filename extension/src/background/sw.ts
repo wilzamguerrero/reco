@@ -786,6 +786,29 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     return;
   }
 
+  if (msg.type === "CAPTURE_TAB_SCREEN") {
+    void (async () => {
+      try {
+        const tab = await getActiveWebTab();
+        if (!tab?.windowId) {
+          sendResponse({ ok: false, error: "No hay pestaña web activa para mirar." });
+          return;
+        }
+        const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+          format: "jpeg",
+          quality: 72,
+        });
+        sendResponse({ ok: true, dataUrl, title: tab.title || "Pantalla" });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : "No se pudo capturar la pantalla.",
+        });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === "RECORDING_RETRY_UPLOAD") {
     void (async () => {
       const config = await getConfig();

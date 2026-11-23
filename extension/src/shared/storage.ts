@@ -38,6 +38,13 @@ export const DEFAULT_CONFIG: AppConfig = {
     targetPageUrl: "",
     writeMode: "toggle_block",
   },
+  ai: {
+    freepiToken: "",
+    freepiHandle: "",
+    model: "",
+    ttsMode: "kokoro",
+    ttsVoice: "ef_dora",
+  },
   orbPosition: null,
 };
 
@@ -54,6 +61,7 @@ function mergeConfig(raw: Partial<AppConfig> | undefined): AppConfig {
     dictation: mergedDict,
     recording: { ...DEFAULT_CONFIG.recording, ...(raw?.recording ?? {}) },
     notion: { ...DEFAULT_CONFIG.notion, ...(raw?.notion ?? {}) },
+    ai: { ...DEFAULT_CONFIG.ai, ...(raw?.ai ?? {}) },
     orbPosition: raw?.orbPosition ?? DEFAULT_CONFIG.orbPosition,
   };
 }
@@ -69,6 +77,7 @@ export async function patchConfig(patch: Partial<AppConfig>): Promise<AppConfig>
     dictation: { ...current.dictation, ...(patch.dictation ?? {}) },
     recording: { ...current.recording, ...(patch.recording ?? {}) },
     notion: { ...current.notion, ...(patch.notion ?? {}) },
+    ai: { ...current.ai, ...(patch.ai ?? {}) },
     orbPosition: patch.orbPosition !== undefined ? patch.orbPosition : current.orbPosition,
   };
   await chrome.storage.local.set({ [CONFIG_KEY]: next });
