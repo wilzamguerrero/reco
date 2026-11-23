@@ -192,6 +192,13 @@ export interface LiveSpeechPayload {
   isFinal: boolean;
 }
 
+export type PageActionPayload =
+  | { kind: "click"; target: string }
+  | { kind: "type"; target: string; text: string; clear?: boolean }
+  | { kind: "press"; key: string }
+  | { kind: "scroll"; direction: "up" | "down" | "top" | "bottom" }
+  | { kind: "navigate"; url: string; newTab?: boolean };
+
 /** Mensajes intercambiados entre Service Worker, Offscreen, Bridge, Content y UI. */
 export type ExtMessage =
   | { type: "GET_STATE" }
@@ -246,6 +253,8 @@ export type ExtMessage =
   | { type: "OFFSCREEN_RECORDING_ERROR"; recordingId: string; message: string }
   | { type: "OPEN_PERMISSIONS"; afterAction?: "dictation" | "recording" }
   | { type: "CAPTURE_TAB_SCREEN" }
+  | { type: "GET_PAGE_SNAPSHOT" }
+  | { type: "EXECUTE_PAGE_ACTION"; action: PageActionPayload }
   | { type: "OPEN_FLOATING_CHAT"; autoVoice?: boolean }
   | { type: "AI_VOICE_TOGGLE"; targetTabId?: number }
   | { type: "AI_VOICE_START"; targetTabId?: number }

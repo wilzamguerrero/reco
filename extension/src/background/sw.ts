@@ -945,6 +945,70 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     return true;
   }
 
+  if (msg.type === "GET_PAGE_SNAPSHOT") {
+    void (async () => {
+      try {
+        const tab = await getActiveWebTab();
+        if (!tab?.id) {
+          sendResponse({ ok: false, error: "No hay pestaña web activa." });
+          return;
+        }
+        await ensureContentInjected(tab.id);
+        const res = await chrome.tabs
+          .sendMessage(tab.id, { type: "GET_PAGE_SNAPSHOT" } satisfies ExtMessage, { frameId: 0 })
+          .catch(() => null);
+        sendResponse(res ?? { ok: false, error: "No se pudo leer la página." });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : "No se pudo leer la página.",
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === "EXECUTE_PAGE_ACTION") {
+    void (async () => {
+      try {
+        if (msg.action.kind === "navigate") {
+          let url = msg.action.url.trim();
+          if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+          if (!/^https?:\/\//i.test(url)) {
+            sendResponse({ ok: false, error: "URL no permitida." });
+            return;
+          }
+          if (msg.action.newTab) {
+            await chrome.tabs.create({ url, active: true });
+          } else {
+            const tab = await getActiveWebTab();
+            if (tab?.id) await chrome.tabs.update(tab.id, { url });
+            else await chrome.tabs.create({ url, active: true });
+          }
+          sendResponse({ ok: true, detail: `Navegando a ${url}` });
+          return;
+        }
+
+        const tab = await getActiveWebTab();
+        if (!tab?.id) {
+          sendResponse({ ok: false, error: "No hay pestaña web activa." });
+          return;
+        }
+        await ensureContentInjected(tab.id);
+        const res = await chrome.tabs
+          .sendMessage(tab.id, msg, { frameId: 0 })
+          .catch(() => null);
+        sendResponse(res ?? { ok: false, error: "No se pudo ejecutar la acción en la página." });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : "Error ejecutando acción en la página.",
+        });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === "OPEN_FLOATING_CHAT") {
     void (async () => {
       const tab = await getActiveWebTab();

@@ -14,6 +14,7 @@ import { mountOrb, type OrbHandle, type OrbVisualState } from "../shared/orbRend
 import { getConfig, patchConfig } from "../shared/storage";
 import type { AppConfig, ExtMessage, LiveState } from "../shared/types";
 import { createDrawOverlay } from "./drawOverlay";
+import { capturePageSnapshot, performPageAction } from "./pageAgent";
 
 const HOST_ID = "reco-ext-host";
 const GUARD_KEY = "__recoOverlayLoaded_v17";
@@ -1129,6 +1130,17 @@ function runOverlay() {
       if (msg.action === "open") drawOverlayHandle?.open();
       else if (msg.action === "close") drawOverlayHandle?.close();
       else drawOverlayHandle?.toggle();
+      return;
+    }
+
+    if (msg.type === "GET_PAGE_SNAPSHOT") {
+      sendResponse(capturePageSnapshot());
+      return;
+    }
+
+    if (msg.type === "EXECUTE_PAGE_ACTION") {
+      void performPageAction(msg.action).then(sendResponse);
+      return true;
     }
   });
 

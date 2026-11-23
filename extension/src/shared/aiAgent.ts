@@ -21,6 +21,7 @@ import type {
   AiProviderId,
   AppConfig,
   ExtMessage,
+  PageActionPayload,
   PersistedChatAttachment,
   PersistedChatMessage,
   SpeechEngineType,
@@ -29,6 +30,9 @@ import type {
 
 const VISION_INTENT_RE =
   /\b(mira|míra|mirar|observa|ver|ves|veo|viendo|puedes ver|qué ves|que ves|qué hay|que hay|revisa|pantalla|página|pagina|estoy haciendo|hago|estoy viendo|dibuj\w*|trazo|trazos|pizarra|bosquejo|esquema|analiza esto|mira esto|captura|imagen|foto|aquí|aqui|esto que)\b/i;
+
+const PAGE_INTERACT_INTENT_RE =
+  /\b(abre|abrir|abrí|abri|clic|click|pulsa|pulsar|presiona|presionar|toca|tocar|dale|selecciona|elige|escribe|escribir|redacta|redactar|pon|ponle|llena|rellena|borra|busca|buscar|envia|envía|enviar|manda|mandar|responde|responder|baja|sube|scroll|desplaza|entra|ve a|ir a|navega|pestaña|correo|correos|email|mail|mensaje|botón|boton|campo|enlace|link|formulario|asunto|destinatario)\b/i;
 
 const catalogCache = new Map<string, { at: number; models: FreePiModel[] }>();
 
@@ -85,7 +89,16 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:NEW_CHAT]] -> limpiar el historial y empezar una conversación nueva con contexto vacío (úsalo cuando pidan nuevo chat, nueva conversación, borrar contexto o empezar de cero; NO abras la ventana de chat ni el panel al hacer esto)\n" +
     "- [[ACTION:OPEN_CHAT]] -> abrir ventana de chat flotante (solo si piden explícitamente ver o abrir la ventana; NO la uses para crear un nuevo chat)\n" +
     "- [[ACTION:OPEN_PANEL]] -> abrir panel lateral de configuración\n" +
-    "SÍ tienes visión: cuando el usuario te pregunta si puedes ver lo que hace, su pantalla o lo que dibuja en la pizarra, el sistema adjunta automáticamente una captura real de su pantalla (incluidos sus dibujos). Descríbela directamente y ayúdalo con naturalidad."
+    "- [[ACTION:PAGE_CLICK|<id_o_texto>]] -> hacer clic en un botón, enlace o correo de la página activa (usa el #id de la lista de elementos visibles, o su texto)\n" +
+    "- [[ACTION:PAGE_TYPE|<id_o_active>|<texto>]] -> escribir texto en un campo o editor de la página (usa el #id del campo o `active` para el campo con foco)\n" +
+    "- [[ACTION:PAGE_PRESS|<Enter|Escape|Tab>]] -> pulsar una tecla en el elemento activo\n" +
+    "- [[ACTION:PAGE_SCROLL|<down|up|top|bottom>]] -> desplazar la página\n" +
+    "- [[ACTION:PAGE_NAVIGATE|<url>]] -> abrir una URL en la pestaña actual\n" +
+    "- [[ACTION:PAGE_OPEN_TAB|<url>]] -> abrir una URL en una pestaña nueva\n" +
+    "SÍ tienes visión y SÍ puedes interactuar directamente con la página web activa (hacer clic, abrir correos o enlaces, escribir en campos, buscar, hacer scroll y navegar). " +
+    "Cuando el usuario te pida ver o hacer algo en la página, recibirás la lista numerada de elementos visibles (y captura de pantalla cuando aplique). " +
+    "Puedes encadenar varias acciones si los campos ya están visibles; si primero necesitas abrir un formulario (por ejemplo pulsar 'Redactar' o 'Correo nuevo'), haz clic primero y avisa que ya quedó abierto. " +
+    "Por seguridad, nunca pulses botones de Enviar, Eliminar o Pagar a menos que el usuario te lo pida explícitamente."
   );
 }
 
@@ -95,13 +108,42 @@ export function stripActionTags(raw: string): string {
 
 export async function executeActionTags(raw: string): Promise<string[]> {
   const executed: string[] = [];
-  const matches = raw.matchAll(/\[\[ACTION:([A-Z_]+)(?:\|([^\]]+))?\]\]/g);
+  const matches = Array.from(raw.matchAll(/\[\[ACTION:([A-Z_]+)(?:\|([^\]]+))?\]\]/g));
+  let hadPageAction = false;
+
+  const runPageAction = async (action: PageActionPayload, label: string) => {
+    if (hadPageAction) {
+      await new Promise((r) => setTimeout(r, 220));
+    }
+    hadPageAction = true;
+    await chrome.runtime
+      .sendMessage({ type: "EXECUTE_PAGE_ACTION", action } satisfies ExtMessage)
+      .catch(() => {});
+    executed.push(label);
+  };
 
   for (const m of matches) {
     const cmd = m[1];
     const arg = (m[2] ?? "").trim();
 
-    if (cmd === "START_RECORDING") {
+    if (cmd === "PAGE_CLICK" && arg) {
+      await runPageAction({ kind: "click", target: arg }, `clic: ${arg}`);
+    } else if (cmd === "PAGE_TYPE" && arg) {
+      const sep = arg.indexOf("|");
+      const target = sep >= 0 ? arg.slice(0, sep).trim() : "active";
+      const text = sep >= 0 ? arg.slice(sep + 1) : arg;
+      if (text) {
+        await runPageAction({ kind: "type", target: target || "active", text }, `escribir: ${target || "active"}`);
+      }
+    } else if (cmd === "PAGE_PRESS" && arg) {
+      await runPageAction({ kind: "press", key: arg }, `tecla: ${arg}`);
+    } else if (cmd === "PAGE_SCROLL" && (arg === "up" || arg === "down" || arg === "top" || arg === "bottom")) {
+      await runPageAction({ kind: "scroll", direction: arg }, `scroll: ${arg}`);
+    } else if (cmd === "PAGE_NAVIGATE" && arg) {
+      await runPageAction({ kind: "navigate", url: arg, newTab: false }, `ir a: ${arg}`);
+    } else if (cmd === "PAGE_OPEN_TAB" && arg) {
+      await runPageAction({ kind: "navigate", url: arg, newTab: true }, `nueva pestaña: ${arg}`);
+    } else if (cmd === "START_RECORDING") {
       await chrome.runtime.sendMessage({ type: "RECORDING_START" } satisfies ExtMessage).catch(() => {});
       executed.push("grabación iniciada");
     } else if (cmd === "STOP_RECORDING") {
@@ -183,9 +225,11 @@ export async function runRecoAgentTurn(opts: {
   }
 
   const atts: PersistedChatAttachment[] = [...(opts.attachments ?? [])];
+  const wantsVision = VISION_INTENT_RE.test(opts.userText);
+  const wantsPageInteract = PAGE_INTERACT_INTENT_RE.test(opts.userText);
 
   // Auto-vision: if user asks RECO to look at screen and no image is attached, capture automatically!
-  if (atts.every((a) => a.kind !== "image") && VISION_INTENT_RE.test(opts.userText)) {
+  if (atts.every((a) => a.kind !== "image") && wantsVision) {
     const cap = (await chrome.runtime
       .sendMessage({ type: "CAPTURE_TAB_SCREEN" } satisfies ExtMessage)
       .catch(() => null)) as { ok?: boolean; dataUrl?: string; title?: string } | null;
@@ -196,6 +240,17 @@ export async function runRecoAgentTurn(opts: {
         name: cap.title ? `Pantalla · ${cap.title.slice(0, 16)}` : "Pantalla",
         dataUrl: cap.dataUrl,
       });
+    }
+  }
+
+  // DOM snapshot of visible interactive elements so RECO can click/type/open on the active page
+  let pageContextNote = "";
+  if (wantsPageInteract || wantsVision) {
+    const snap = (await chrome.runtime
+      .sendMessage({ type: "GET_PAGE_SNAPSHOT" } satisfies ExtMessage)
+      .catch(() => null)) as { ok?: boolean; summary?: string } | null;
+    if (snap?.ok && snap.summary) {
+      pageContextNote = snap.summary;
     }
   }
 
@@ -220,15 +275,19 @@ export async function runRecoAgentTurn(opts: {
     { role: "system", content: buildRecoSystemPrompt(cfg) },
   ];
 
-  for (const m of workingHistory.slice(-13, -1)) {
+  const turnSlice = workingHistory.slice(-13, -1);
+  for (let idx = 0; idx < turnSlice.length; idx += 1) {
+    const m = turnSlice[idx];
     if (m.role === "assistant") {
       wireMessages.push({ role: "assistant", content: m.text });
       continue;
     }
+    const isCurrentTurn = idx === turnSlice.length - 1;
     const docs = (m.attachments ?? []).filter((a) => a.kind === "doc" && a.textContent);
     const imgs = (m.attachments ?? []).filter((a) => a.kind === "image" && a.dataUrl);
     const docPrefix = docs.map((d) => `[Documento: ${d.name}]\n${d.textContent}`).join("\n\n");
-    const combinedText = docPrefix ? `${docPrefix}\n\n${m.text}` : m.text;
+    const pagePrefix = isCurrentTurn && pageContextNote ? `${pageContextNote}\n\n` : "";
+    const combinedText = `${pagePrefix}${docPrefix ? `${docPrefix}\n\n` : ""}${m.text}`;
 
     if (imgs.length > 0) {
       const parts: ChatMessagePart[] = [{ type: "text", text: combinedText }];
