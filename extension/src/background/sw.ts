@@ -1022,6 +1022,218 @@ chrome.runtime.onMessage.addListener((msg: ExtMessage, sender, sendResponse) => 
     return true;
   }
 
+  if (msg.type === "GET_BROWSER_TABS") {
+    void (async () => {
+      try {
+        const tabs = await chrome.tabs.query({ windowType: "normal" }).catch(() => []);
+        const visible = tabs.filter(
+          (t) =>
+            t.id &&
+            t.url &&
+            !t.url.startsWith("chrome-extension://"),
+        );
+        const lines = visible.slice(0, 35).map((t) => {
+          const flags = [
+            t.active ? "activa" : "",
+            t.pinned ? "fijada" : "",
+            t.audible ? "audio" : "",
+            t.mutedInfo?.muted ? "silenciada" : "",
+          ]
+            .filter(Boolean)
+            .join(", ");
+          const flagStr = flags ? ` (${flags})` : "";
+          const title = (t.title || "Sin título").replace(/\s+/g, " ").trim().slice(0, 70);
+          return `- tab#${t.id}${flagStr} "${title}" (${t.url})`;
+        });
+        sendResponse({
+          ok: true,
+          summary:
+            lines.length > 0
+              ? `[Pestañas abiertas en el navegador (${visible.length}):]\n${lines.join("\n")}`
+              : "",
+        });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : "No se pudieron listar las pestañas.",
+        });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === "EXECUTE_BROWSER_ACTION") {
+    void (async () => {
+      const norm = (s: string) =>
+        s
+          .normalize("NFD")
+          .replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase()
+          .replace(/\s+/g, " ")
+          .trim();
+
+      const trigrams = (s: string) => {
+        const padded = `  ${s} `;
+        const set = new Set<string>();
+        for (let i = 0; i <= padded.length - 3; i += 1) set.add(padded.slice(i, i + 3));
+        return set;
+      };
+
+      const diceScore = (a: string, b: string) => {
+        const ta = trigrams(a);
+        const tb = trigrams(b);
+        if (ta.size === 0 || tb.size === 0) return 0;
+        let hit = 0;
+        for (const g of ta) if (tb.has(g)) hit += 1;
+        return (2 * hit) / (ta.size + tb.size);
+      };
+
+      const findTab = async (target?: string): Promise<chrome.tabs.Tab | null> => {
+        const all = (await chrome.tabs.query({ windowType: "normal" }).catch(() => [])).filter(
+          (t) => t.id && t.url && !t.url.startsWith("chrome-extension://"),
+        );
+        const q = (target ?? "").trim();
+        if (!q || /^(current|actual|esta|activa)$/i.test(q)) {
+          return (await getActiveWebTab()) ?? all.find((t) => t.active) ?? null;
+        }
+        const idMatch = q.match(/^(?:tab)?#?(\d+)$/i);
+        if (idMatch) {
+          const byId = all.find((t) => t.id === Number(idMatch[1]));
+          if (byId) return byId;
+        }
+        const needle = norm(q);
+        const direct = all.find(
+          (t) => norm(t.title || "").includes(needle) || norm(t.url || "").includes(needle),
+        );
+        if (direct) return direct;
+
+        let best: { tab: chrome.tabs.Tab; score: number } | null = null;
+        for (const t of all) {
+          const hay = `${norm(t.title || "")} ${norm(t.url || "")}`;
+          const tokens = hay.split(/[^a-z0-9]+/).filter((w) => w.length >= 3);
+          let score = diceScore(needle, norm(t.title || ""));
+          for (const tok of tokens) {
+            score = Math.max(score, diceScore(needle, tok));
+          }
+          if (score >= 0.34 && (!best || score > best.score)) {
+            best = { tab: t, score };
+          }
+        }
+        return best?.tab ?? null;
+      };
+
+      try {
+        const act = msg.action;
+        if (act.kind === "switch_tab") {
+          const tab = await findTab(act.target);
+          if (!tab?.id) {
+            sendResponse({ ok: false, error: `No encontré la pestaña "${act.target}".` });
+            return;
+          }
+          if (tab.windowId !== undefined) {
+            await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+          }
+          await chrome.tabs.update(tab.id, { active: true });
+          lastTargetTabId = tab.id;
+          sendResponse({ ok: true, detail: `Cambiado a "${tab.title}"` });
+          return;
+        }
+
+        if (act.kind === "close_tab") {
+          const tab = await findTab(act.target);
+          if (!tab?.id) {
+            sendResponse({ ok: false, error: "No encontré la pestaña para cerrar." });
+            return;
+          }
+          await chrome.tabs.remove(tab.id);
+          sendResponse({ ok: true, detail: `Pestaña cerrada: "${tab.title}"` });
+          return;
+        }
+
+        if (act.kind === "new_tab") {
+          const raw = (act.urlOrQuery ?? "").trim();
+          if (!raw) {
+            await chrome.tabs.create({ active: true });
+          } else if (/^(https?:\/\/|[\w-]+\.[a-z]{2,}(\/|$))/i.test(raw) && !raw.includes(" ")) {
+            const url = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+            await chrome.tabs.create({ url, active: true });
+          } else {
+            await chrome.tabs.create({
+              url: `https://www.google.com/search?q=${encodeURIComponent(raw)}`,
+              active: true,
+            });
+          }
+          sendResponse({ ok: true, detail: "Nueva pestaña abierta" });
+          return;
+        }
+
+        if (act.kind === "duplicate_tab") {
+          const tab = await getActiveWebTab();
+          if (tab?.id) await chrome.tabs.duplicate(tab.id);
+          sendResponse({ ok: true, detail: "Pestaña duplicada" });
+          return;
+        }
+
+        if (act.kind === "pin_tab") {
+          const tab = await getActiveWebTab();
+          if (tab?.id) await chrome.tabs.update(tab.id, { pinned: !tab.pinned });
+          sendResponse({ ok: true, detail: "Fijado de pestaña alternado" });
+          return;
+        }
+
+        if (act.kind === "mute_tab") {
+          const tab = await findTab(act.target);
+          if (tab?.id) {
+            const nextMuted = !tab.mutedInfo?.muted;
+            await chrome.tabs.update(tab.id, { muted: nextMuted });
+          }
+          sendResponse({ ok: true, detail: "Audio de pestaña alternado" });
+          return;
+        }
+
+        if (act.kind === "search_web") {
+          const url = `https://www.google.com/search?q=${encodeURIComponent(act.query)}`;
+          await chrome.tabs.create({ url, active: true });
+          sendResponse({ ok: true, detail: `Buscando "${act.query}"` });
+          return;
+        }
+
+        if (act.kind === "bookmark_current") {
+          const tab = await getActiveWebTab();
+          if (tab?.url && chrome.bookmarks?.create) {
+            await chrome.bookmarks.create({ title: tab.title || tab.url, url: tab.url });
+            sendResponse({ ok: true, detail: "Guardado en marcadores" });
+          } else {
+            sendResponse({ ok: false, error: "No se pudo guardar marcador." });
+          }
+          return;
+        }
+
+        if (act.kind === "open_history") {
+          if (chrome.history?.search) {
+            const items = await chrome.history.search({ text: act.query, maxResults: 5 });
+            const hit = items.find((i) => i.url);
+            if (hit?.url) {
+              await chrome.tabs.create({ url: hit.url, active: true });
+              sendResponse({ ok: true, detail: `Abierto del historial: ${hit.title || hit.url}` });
+              return;
+            }
+          }
+          sendResponse({ ok: false, error: `No encontré "${act.query}" en el historial.` });
+          return;
+        }
+
+        sendResponse({ ok: false, error: "Acción de navegador no soportada." });
+      } catch (err) {
+        sendResponse({
+          ok: false,
+          error: err instanceof Error ? err.message : "Error ejecutando acción del navegador.",
+        });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === "OPEN_FLOATING_CHAT") {
     void (async () => {
       const tab = await getActiveWebTab();

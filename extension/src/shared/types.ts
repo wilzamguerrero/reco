@@ -192,6 +192,17 @@ export interface LiveSpeechPayload {
   isFinal: boolean;
 }
 
+export type BrowserActionPayload =
+  | { kind: "switch_tab"; target: string }
+  | { kind: "close_tab"; target?: string }
+  | { kind: "new_tab"; urlOrQuery?: string }
+  | { kind: "duplicate_tab" }
+  | { kind: "pin_tab" }
+  | { kind: "mute_tab"; target?: string }
+  | { kind: "search_web"; query: string }
+  | { kind: "bookmark_current" }
+  | { kind: "open_history"; query: string };
+
 export type PageActionPayload =
   | { kind: "click"; target: string }
   | { kind: "type"; target: string; text: string; clear?: boolean }
@@ -261,6 +272,8 @@ export type ExtMessage =
   | { type: "CAPTURE_TAB_SCREEN" }
   | { type: "GET_PAGE_SNAPSHOT" }
   | { type: "EXECUTE_PAGE_ACTION"; action: PageActionPayload }
+  | { type: "GET_BROWSER_TABS" }
+  | { type: "EXECUTE_BROWSER_ACTION"; action: BrowserActionPayload }
   | { type: "OPEN_FLOATING_CHAT"; autoVoice?: boolean }
   | { type: "AI_VOICE_TOGGLE"; targetTabId?: number }
   | { type: "AI_VOICE_START"; targetTabId?: number }

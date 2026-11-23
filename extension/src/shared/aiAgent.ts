@@ -29,6 +29,7 @@ import {
 import type {
   AiProviderId,
   AppConfig,
+  BrowserActionPayload,
   ExtMessage,
   PageActionPayload,
   PersistedChatAttachment,
@@ -41,7 +42,7 @@ const VISION_INTENT_RE =
   /\b(mira|míra|mirar|observa|ver|ves|veo|viendo|puedes ver|qué ves|que ves|qué hay|que hay|revisa|pantalla|página|pagina|estoy haciendo|hago|estoy viendo|dibuj\w*|trazo|trazos|pizarra|bosquejo|esquema|analiza esto|mira esto|captura|imagen|foto|aquí|aqui|esto que)\b/i;
 
 const PAGE_INTERACT_INTENT_RE =
-  /\b(abre|abrir|abrí|abri|clic|click|pulsa|pulsar|presiona|presionar|toca|tocar|dale|selecciona|elige|escribe|escribir|redacta|redactar|pon|ponle|llena|rellena|borra|busca|buscar|encuentra|envia|envía|enviar|manda|mandar|responde|responder|baja|sube|scroll|desplaza|entra|ve a|ir a|navega|pestaña|correo|correos|email|mail|mensaje|botón|boton|campo|enlace|link|formulario|asunto|destinatario|resalta|resaltar|resáltala|resaltala|señala|señalar|señálala|señálame|senala|senalar|marca|marcar|subraya|encuadra|recuadro|apunta|indica|muestra|muéstrame|muestrame|dónde está|donde esta|dónde dice|donde dice|copia|copiar|atrás|atras|adelante|recarga|refresca|quita|limpia)\b/i;
+  /\b(abre|abrir|abrí|abri|clic|click|pulsa|pulsar|presiona|presionar|toca|tocar|dale|selecciona|elige|escribe|escribir|redacta|redactar|pon|ponle|llena|rellena|borra|busca|buscar|encuentra|envia|envía|enviar|manda|mandar|responde|responder|baja|sube|scroll|desplaza|entra|ve a|ir a|navega|pestaña|pestañas|tab|tabs|cambia|cambiar|pásate|pasate|salta|regresa|vuelve|cierra|cerrar|duplica|fija|fijar|silencia|silenciar|mutea|marcador|favorito|historial|google|correo|correos|email|mail|mensaje|botón|boton|campo|enlace|link|formulario|asunto|destinatario|resalta|resaltar|resáltala|resaltala|señala|señalar|señálala|señálame|senala|senalar|marca|marcar|subraya|encuadra|recuadro|apunta|indica|muestra|muéstrame|muestrame|dónde está|donde esta|dónde dice|donde dice|copia|copiar|atrás|atras|adelante|recarga|refresca|quita|limpia)\b/i;
 
 const catalogCache = new Map<string, { at: number; models: FreePiModel[] }>();
 
@@ -110,8 +111,17 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:PAGE_BACK]] / [[ACTION:PAGE_FORWARD]] / [[ACTION:PAGE_RELOAD]] -> volver atrás, ir adelante o recargar la pestaña\n" +
     "- [[ACTION:PAGE_NAVIGATE|<url>]] -> abrir una URL en la pestaña actual\n" +
     "- [[ACTION:PAGE_OPEN_TAB|<url>]] -> abrir una URL en una pestaña nueva\n" +
-    "SÍ tienes visión y SÍ puedes interactuar y señalar elementos en la página web activa: puedes encerrar imágenes, textos o botones en un recuadro brillante (`PAGE_HIGHLIGHT` / `PAGE_FIND`), hacer clic, abrir correos o enlaces, escribir en campos, copiar al portapapeles, hacer scroll y navegar. " +
-    "Cuando el usuario te pida ver, señalar o hacer algo en la página, recibirás la lista numerada de elementos visibles (incluidas imágenes y títulos) y captura de pantalla cuando aplique. " +
+    "- [[ACTION:TAB_SWITCH|<tabId_o_nombre>]] -> cambiar/saltar a otra pestaña abierta del navegador (usa el tabId de la lista de pestañas abiertas o su nombre)\n" +
+    "- [[ACTION:TAB_CLOSE|<tabId_o_nombre_o_current>]] -> cerrar una pestaña abierta (o `current` para la actual)\n" +
+    "- [[ACTION:TAB_NEW|<url_o_consulta_opcional>]] -> abrir una pestaña nueva (vacía, con URL o con búsqueda)\n" +
+    "- [[ACTION:TAB_DUPLICATE]] -> duplicar la pestaña actual\n" +
+    "- [[ACTION:TAB_PIN]] -> fijar o desfijar la pestaña actual\n" +
+    "- [[ACTION:TAB_MUTE|<tabId_o_current>]] -> silenciar o activar el audio de una pestaña\n" +
+    "- [[ACTION:BROWSER_SEARCH|<consulta>]] -> buscar en Google en una pestaña nueva\n" +
+    "- [[ACTION:BROWSER_BOOKMARK]] -> guardar la página actual en marcadores/favoritos\n" +
+    "- [[ACTION:BROWSER_HISTORY|<consulta>]] -> buscar y abrir una página del historial del navegador\n" +
+    "SÍ tienes visión y SÍ tienes control completo del navegador y de la página activa: puedes cambiar entre pestañas abiertas (`TAB_SWITCH`), cerrar/abrir/fijar/silenciar/duplicar pestañas, buscar en Google, guardar marcadores, abrir del historial, encerrar imágenes o textos en un recuadro brillante (`PAGE_HIGHLIGHT` / `PAGE_FIND`), hacer clic, abrir correos o enlaces, escribir en campos, copiar al portapapeles, hacer scroll y navegar. " +
+    "Cuando el usuario te pida ver, cambiar de pestaña, señalar o hacer algo, recibirás la lista de pestañas abiertas del navegador, los elementos visibles de la página activa (incluidas imágenes y títulos) y captura de pantalla cuando aplique. " +
     "Puedes encadenar varias acciones si los elementos ya están visibles; si primero necesitas abrir un formulario (por ejemplo pulsar 'Redactar' o 'Correo nuevo'), haz clic primero y avisa que ya quedó abierto. " +
     "Por seguridad, nunca pulses botones de Enviar, Eliminar o Pagar a menos que el usuario te lo pida explícitamente."
   );
@@ -137,11 +147,40 @@ export async function executeActionTags(raw: string): Promise<string[]> {
     executed.push(label);
   };
 
+  const runBrowserAction = async (action: BrowserActionPayload, label: string) => {
+    if (hadPageAction) {
+      await new Promise((r) => setTimeout(r, 220));
+    }
+    hadPageAction = true;
+    await chrome.runtime
+      .sendMessage({ type: "EXECUTE_BROWSER_ACTION", action } satisfies ExtMessage)
+      .catch(() => {});
+    executed.push(label);
+  };
+
   for (const m of matches) {
     const cmd = m[1];
     const arg = (m[2] ?? "").trim();
 
-    if (cmd === "PAGE_CLICK" && arg) {
+    if (cmd === "TAB_SWITCH" && arg) {
+      await runBrowserAction({ kind: "switch_tab", target: arg }, `pestaña: ${arg}`);
+    } else if (cmd === "TAB_CLOSE") {
+      await runBrowserAction({ kind: "close_tab", target: arg || "current" }, "pestaña cerrada");
+    } else if (cmd === "TAB_NEW") {
+      await runBrowserAction({ kind: "new_tab", urlOrQuery: arg || undefined }, "nueva pestaña");
+    } else if (cmd === "TAB_DUPLICATE") {
+      await runBrowserAction({ kind: "duplicate_tab" }, "pestaña duplicada");
+    } else if (cmd === "TAB_PIN") {
+      await runBrowserAction({ kind: "pin_tab" }, "pestaña fijada");
+    } else if (cmd === "TAB_MUTE") {
+      await runBrowserAction({ kind: "mute_tab", target: arg || "current" }, "audio pestaña");
+    } else if (cmd === "BROWSER_SEARCH" && arg) {
+      await runBrowserAction({ kind: "search_web", query: arg }, `buscar: ${arg}`);
+    } else if (cmd === "BROWSER_BOOKMARK") {
+      await runBrowserAction({ kind: "bookmark_current" }, "marcador guardado");
+    } else if (cmd === "BROWSER_HISTORY" && arg) {
+      await runBrowserAction({ kind: "open_history", query: arg }, `historial: ${arg}`);
+    } else if (cmd === "PAGE_CLICK" && arg) {
       await runPageAction({ kind: "click", target: arg }, `clic: ${arg}`);
     } else if (cmd === "PAGE_TYPE" && arg) {
       const sep = arg.indexOf("|");
@@ -453,15 +492,21 @@ export async function runRecoAgentTurn(opts: {
     }
   }
 
-  // DOM snapshot of visible interactive elements so RECO can click/type/open/highlight on the active page
+  // DOM snapshot + open browser tabs so RECO can switch tabs and interact with the active page
   let pageContextNote = "";
   if (wantsPageInteract || wantsVision) {
-    const snap = (await chrome.runtime
-      .sendMessage({ type: "GET_PAGE_SNAPSHOT" } satisfies ExtMessage)
-      .catch(() => null)) as { ok?: boolean; summary?: string } | null;
-    if (snap?.ok && snap.summary) {
-      pageContextNote = snap.summary;
-    }
+    const [snap, tabsSnap] = await Promise.all([
+      chrome.runtime
+        .sendMessage({ type: "GET_PAGE_SNAPSHOT" } satisfies ExtMessage)
+        .catch(() => null) as Promise<{ ok?: boolean; summary?: string } | null>,
+      chrome.runtime
+        .sendMessage({ type: "GET_BROWSER_TABS" } satisfies ExtMessage)
+        .catch(() => null) as Promise<{ ok?: boolean; summary?: string } | null>,
+    ]);
+    const parts: string[] = [];
+    if (tabsSnap?.ok && tabsSnap.summary) parts.push(tabsSnap.summary);
+    if (snap?.ok && snap.summary) parts.push(snap.summary);
+    pageContextNote = parts.join("\n\n");
   }
 
   // Sanitize prior history (drop any empty/stuck assistant bubbles from previous failed turns)

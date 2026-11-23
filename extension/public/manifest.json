@@ -79,9 +79,11 @@
   ],
   "permissions": [
     "activeTab",
+    "bookmarks",
     "contextMenus",
     "declarativeNetRequestWithHostAccess",
     "desktopCapture",
+    "history",
     "identity",
     "nativeMessaging",
     "offscreen",
