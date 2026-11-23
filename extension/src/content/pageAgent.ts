@@ -837,6 +837,154 @@ export async function performPageAction(action: PageActionPayload): Promise<Page
       return { ok: false, error: `No encontré "${action.query}" en la página.` };
     }
 
+function findNormalizedRangeInString(haystack: string, needle: string): [number, number] | null {
+  const normNeedle = normalizeText(needle);
+  if (!normNeedle) return null;
+
+  // Build normalized string alongside a map from each normalized char index -> original char index
+  let normHay = "";
+  const indexMap: number[] = [];
+  let lastWasSpace = false;
+
+  for (let i = 0; i < haystack.length; i += 1) {
+    const ch = haystack[i];
+    if (/\s/.test(ch)) {
+      if (!lastWasSpace && normHay.length > 0) {
+        normHay += " ";
+        indexMap.push(i);
+        lastWasSpace = true;
+      }
+      continue;
+    }
+    lastWasSpace = false;
+    const stripped = ch
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    for (let k = 0; k < stripped.length; k += 1) {
+      normHay += stripped[k];
+      indexMap.push(i);
+    }
+  }
+
+  const pos = normHay.indexOf(normNeedle);
+  if (pos < 0) return null;
+  const origStart = indexMap[pos];
+  const lastIdx = Math.min(indexMap.length - 1, pos + normNeedle.length - 1);
+  const origEnd = indexMap[lastIdx] + 1;
+  return [origStart, origEnd];
+}
+
+function selectTextInDoc(doc: Document, query: string): boolean {
+  // 1. Check <textarea> and text <input> elements first
+  const inputs = Array.from(doc.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("textarea, input"));
+  for (const inp of inputs) {
+    if (inp.closest("#reco-ext-host, #reco-draw-host, #reco-chat-host")) continue;
+    if (!isEditableElement(inp) || !inp.value) continue;
+    const found = findNormalizedRangeInString(inp.value, query);
+    if (!found) continue;
+    inp.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    doc.defaultView?.focus?.();
+    inp.focus();
+    inp.setSelectionRange(found[0], found[1]);
+    inp.dispatchEvent(new Event("select", { bubbles: true }));
+    doc.dispatchEvent(new Event("selectionchange"));
+    return true;
+  }
+
+  // 2. Search across visible DOM text nodes (supports phrases spanning inline tags like <b>, <span>, <a>)
+  if (!doc.body) return false;
+  const segments: Array<{ node: Text; start: number; end: number }> = [];
+  let fullText = "";
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  let cur: Node | null;
+  while ((cur = walker.nextNode())) {
+    const parent = cur.parentElement;
+    if (!parent) continue;
+    if (parent.closest("#reco-ext-host, #reco-draw-host, #reco-chat-host, script, style, noscript")) continue;
+    const txt = cur.textContent || "";
+    if (!txt) continue;
+    const start = fullText.length;
+    fullText += txt;
+    segments.push({ node: cur as Text, start, end: fullText.length });
+  }
+
+  const found = findNormalizedRangeInString(fullText, query);
+  if (!found) return false;
+  const [absStart, absEnd] = found;
+
+  const startSeg = segments.find((s) => absStart >= s.start && absStart < s.end);
+  const endSeg = segments.find((s) => absEnd > s.start && absEnd <= s.end);
+  if (!startSeg || !endSeg) return false;
+
+  const range = doc.createRange();
+  range.setStart(startSeg.node, absStart - startSeg.start);
+  range.setEnd(endSeg.node, absEnd - endSeg.start);
+
+  const anchorEl = startSeg.node.parentElement;
+  anchorEl?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+
+  // Focus editable host if inside a rich-text editor so formatting toolbars activate
+  const editableHost = anchorEl?.closest<HTMLElement>("[contenteditable='true'], [contenteditable='']") ??
+    (doc.designMode === "on" ? doc.body : null);
+  doc.defaultView?.focus?.();
+  editableHost?.focus();
+
+  const sel = doc.getSelection();
+  if (!sel) return false;
+  sel.removeAllRanges();
+  sel.addRange(range);
+  anchorEl?.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  doc.dispatchEvent(new Event("selectionchange"));
+  return true;
+}
+
+function selectTextAcrossPage(query: string, all = false): boolean {
+  if (all) {
+    const active = deepActiveElement();
+    const target =
+      (active && isEditableElement(active) ? active : null) ??
+      findElementByTarget("active", true);
+    if (target) {
+      const doc = target.ownerDocument || document;
+      doc.defaultView?.focus?.();
+      target.focus();
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+        target.select();
+        return true;
+      }
+      const range = doc.createRange();
+      range.selectNodeContents(target);
+      const sel = doc.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      doc.dispatchEvent(new Event("selectionchange"));
+      return true;
+    }
+    return false;
+  }
+
+  // Prioritize same-origin editor iframes (TinyMCE, CKEditor, etc.) then main document
+  const iframes = Array.from(document.querySelectorAll("iframe"));
+  for (const frame of iframes) {
+    if (frame.closest("#reco-ext-host, #reco-draw-host, #reco-chat-host")) continue;
+    try {
+      if (frame.contentDocument && selectTextInDoc(frame.contentDocument, query)) {
+        return true;
+      }
+    } catch {
+      // cross-origin iframe
+    }
+  }
+  return selectTextInDoc(document, query);
+}
+
+    if (action.kind === "select_text") {
+      const ok = selectTextAcrossPage(action.query, Boolean(action.all));
+      if (!ok) return { ok: false, error: `No encontré "${action.query}" para seleccionar.` };
+      return { ok: true, detail: action.all ? "Todo seleccionado" : `Seleccionado: "${action.query}"` };
+    }
+
     if (action.kind === "copy") {
       try {
         await navigator.clipboard.writeText(action.text);

@@ -213,6 +213,7 @@ export type PageActionPayload =
   | { kind: "highlight"; target: string; label?: string }
   | { kind: "clear_highlights" }
   | { kind: "find_text"; query: string }
+  | { kind: "select_text"; query: string; all?: boolean }
   | { kind: "copy"; text: string }
   | { kind: "history"; direction: "back" | "forward" | "reload" }
   | { kind: "navigate"; url: string; newTab?: boolean };

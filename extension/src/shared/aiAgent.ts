@@ -106,7 +106,9 @@ export function buildRecoSystemPrompt(cfg: AppConfig): string {
     "- [[ACTION:PAGE_PRESS|<Enter|Escape|Tab>]] -> pulsar una tecla en el elemento activo\n" +
     "- [[ACTION:PAGE_HIGHLIGHT|<id_o_texto>|<etiqueta_opcional>]] -> señalar/resaltar con un recuadro brillante cualquier imagen, botón, enlace o sección de la página (puedes resaltar varios a la vez)\n" +
     "- [[ACTION:PAGE_CLEAR_HIGHLIGHTS]] -> quitar los recuadros de resaltado de la página\n" +
-    "- [[ACTION:PAGE_FIND|<texto>]] -> buscar un texto en la página, desplazarse hasta él y encerrarlo en un recuadro\n" +
+    "- [[ACTION:PAGE_FIND|<texto>]] -> buscar un texto en la página, desplazarse hasta él y encerrarlo en un recuadro visual\n" +
+    "- [[ACTION:PAGE_SELECT|<texto_exacto>]] -> seleccionar texto de forma nativa (como arrastrando el ratón en azul) dentro de un editor o página, listo para copiar, borrar o aplicar negrita/formato\n" +
+    "- [[ACTION:PAGE_SELECT_ALL]] -> seleccionar todo el texto del editor activo\n" +
     "- [[ACTION:PAGE_SCROLL|<down|up|top|bottom>]] -> desplazar la página\n" +
     "- [[ACTION:PAGE_SCROLL_TO|<id_o_texto>]] -> desplazar la vista directamente hasta un elemento o sección\n" +
     "- [[ACTION:PAGE_COPY|<texto>]] -> copiar un texto o enlace al portapapeles del usuario\n" +
@@ -212,6 +214,10 @@ export async function executeActionTags(raw: string): Promise<string[]> {
       await runPageAction({ kind: "clear_highlights" }, "limpiar resaltados");
     } else if (cmd === "PAGE_FIND" && arg) {
       await runPageAction({ kind: "find_text", query: arg }, `buscar texto: ${arg}`);
+    } else if (cmd === "PAGE_SELECT" && arg) {
+      await runPageAction({ kind: "select_text", query: arg }, `seleccionar: ${arg}`);
+    } else if (cmd === "PAGE_SELECT_ALL") {
+      await runPageAction({ kind: "select_text", query: "", all: true }, "seleccionar todo");
     } else if (cmd === "PAGE_SCROLL_TO" && arg) {
       await runPageAction({ kind: "scroll_to", target: arg }, `ir al elemento: ${arg}`);
     } else if (cmd === "PAGE_COPY" && arg) {
